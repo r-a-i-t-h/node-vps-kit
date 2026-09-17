@@ -54,6 +54,8 @@ The kit must already be on the box.
 sudo proseden-install -Name www -ServerName www.proseden.co.uk -Port 3336
 ```
 
+Omit flags on a terminal and the command offers a numbered menu (`1` / `a` select the first item). You can also type a value. Non-interactive runs still need the flags.
+
 That command:
 
 1. Loads `apps/proseden.psd1` from the local kit.
@@ -79,6 +81,8 @@ Multiple instances: different `-Name`, `-Port`, and hostname or base path. Each 
 sudo proseden-update -Name test
 sudo proseden-update -Name www -Version v0.2.0
 ```
+
+On a terminal, `sudo proseden-update` with no `-Name` lists installed instances.
 
 The updater backs up `data/` to a zip, swaps the app tree, runs optional
 `deploy/post-update.sh` from the release (as the app user), and restarts systemd.
@@ -115,6 +119,7 @@ process starts on VPS boot.
 sudo nvk-startup                          # list
 sudo nvk-startup -Remove -App proseden -Name www
 sudo nvk-startup -Add -App proseden -Name www
+sudo nvk-startup -Remove                  # pick the instance from a menu
 ```
 
 `-Remove` only drops the unit (stop, disable, delete the file). Code, data, and

@@ -12,13 +12,14 @@ this kit — run nvk-update for that.
 .EXAMPLE
 sudo proseden-update -Name test
 sudo proseden-update -Name www -Version v0.2.0
+
+.EXAMPLE
+sudo proseden-update
+# On a terminal, missing -Name is chosen from installed instances.
 #>
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)]
     [string]$App,
-
-    [Parameter(Mandatory)]
     [string]$Name,
 
     [string]$Prefix,
@@ -54,6 +55,9 @@ update: kit not found. Install the kit first:
 
 Import-Module (Join-Path $moduleRoot 'Nvk.psm1') -Force
 Set-NvkCommand 'update'
+
+$App = Resolve-NvkAppIdParam -AppId $App
+$Name = Resolve-NvkInstanceNameParam -AppId $App -Name $Name -For Existing
 
 Update-NvkAppInstance `
     -AppId $App `

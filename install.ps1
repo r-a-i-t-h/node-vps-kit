@@ -10,16 +10,15 @@ GitHub Release and writes systemd and nginx for one named instance.
 
 .EXAMPLE
 sudo proseden-install -Name www -ServerName www.proseden.co.uk -Port 3336
+
+.EXAMPLE
+sudo proseden-install
+# On a terminal, missing flags are chosen from a numbered menu.
 #>
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)]
     [string]$App,
-
-    [Parameter(Mandatory)]
     [string]$Name,
-
-    [Parameter(Mandatory)]
     [int]$Port,
 
     [string]$ServerName,
@@ -62,16 +61,26 @@ install: kit not found. Install the kit first, then install the app:
 Import-Module (Join-Path $moduleRoot 'Nvk.psm1') -Force
 Set-NvkCommand 'install'
 
+$App = Resolve-NvkAppIdParam -AppId $App
+$Name = Resolve-NvkInstanceNameParam -AppId $App -Name $Name -For New
+$Port = Resolve-NvkPortParam -Port $Port
+$nginx = Resolve-NvkNginxInstallParams `
+    -ServerName $ServerName `
+    -NginxSite $NginxSite `
+    -BasePath $BasePath `
+    -SkipNginx:$SkipNginx `
+    -InstanceName $Name
+
 Install-NvkAppInstance `
     -AppId $App `
     -Name $Name `
     -Port $Port `
-    -ServerName $ServerName `
-    -NginxSite $NginxSite `
-    -BasePath $BasePath `
+    -ServerName $nginx.ServerName `
+    -NginxSite $nginx.NginxSite `
+    -BasePath $nginx.BasePath `
     -Prefix $Prefix `
     -Repo $Repo `
     -Version $Version `
     -Archive $Archive `
     -User $User `
-    -SkipNginx:$SkipNginx
+    -SkipNginx:$nginx.SkipNginx

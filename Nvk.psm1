@@ -370,9 +370,15 @@ function Assert-NvkRoot {
     }
 }
 
+function Test-NvkName {
+    param([string]$Name)
+    if ([string]::IsNullOrWhiteSpace($Name)) { return $false }
+    ($Name -match '^[a-zA-Z0-9_-]+$') -and -not $Name.StartsWith('-') -and -not $Name.EndsWith('_')
+}
+
 function Assert-NvkName {
     param([Parameter(Mandatory)][string]$Name)
-    if ($Name -notmatch '^[a-zA-Z0-9_-]+$' -or $Name.StartsWith('-') -or $Name.EndsWith('_')) {
+    if (-not (Test-NvkName $Name)) {
         Write-NvkError '-Name must be letters, digits, hyphen, or underscore'
     }
 }
@@ -1093,6 +1099,464 @@ function Remove-NvkOldReleases {
             Remove-Item -LiteralPath $_.FullName -Recurse -Force
         }
     }
+}
+
+function New-NvkChoice {
+    param(
+        [Parameter(Mandatory)][string]$Label,
+        [Parameter(Mandatory)]$Value
+    )
+    [pscustomobject]@{ Label = $Label; Value = $Value }
+}
+
+function Test-NvkInteractive {
+    if ($env:NVK_INTERACTIVE -eq '0') { return $false }
+    if ($env:NVK_INTERACTIVE -eq '1') { return $true }
+    try {
+        if ([Console]::IsInputRedirected) { return $false }
+    }
+    catch {
+        return $false
+    }
+    [bool][Environment]::UserInteractive
+}
+
+function Resolve-NvkMenuSelection {
+    param(
+        [string]$Text,
+        [AllowEmptyCollection()][object[]]$Choices = @(),
+        [switch]$AllowCustom
+    )
+    if ($null -eq $Text) { return $null }
+    $raw = $Text.Trim()
+    if ($raw -eq '') { return $null }
+    $list = @($Choices)
+    $n = $list.Count
+
+    $parsed = 0
+    if ([int]::TryParse($raw, [Globalization.NumberStyles]::Integer, [cultureinfo]::InvariantCulture, [ref]$parsed)) {
+        if ($parsed -ge 1 -and $parsed -le $n) {
+            return $list[$parsed - 1]
+        }
+        if ($AllowCustom) {
+            return (New-NvkChoice -Label $raw -Value $raw)
+        }
+        return $null
+    }
+
+    if ($raw -match '^[A-Za-z]$') {
+        $i = [int][char]($raw.ToLowerInvariant()[0]) - [int][char]'a'
+        if ($i -ge 0 -and $i -lt $n -and $i -lt 26) {
+            return $list[$i]
+        }
+        return $null
+    }
+
+    $exact = @($list | Where-Object { [string]$_.Value -eq $raw -or $_.Label -eq $raw })
+    if ($exact.Count -eq 1) { return $exact[0] }
+
+    $prefix = @($list | Where-Object { [string]$_.Value -like "$raw*" -or $_.Label -like "$raw*" })
+    if ($prefix.Count -eq 1) { return $prefix[0] }
+
+    if ($AllowCustom) {
+        return (New-NvkChoice -Label $raw -Value $raw)
+    }
+    $null
+}
+
+function Read-NvkChoice {
+    param(
+        [Parameter(Mandatory)][string]$Message,
+        [AllowEmptyCollection()][object[]]$Choices = @(),
+        [switch]$AllowCustom,
+        [string]$MissingError
+    )
+    $list = @($Choices)
+    if ($list.Count -eq 0 -and -not $AllowCustom) {
+        Write-NvkError $(if ($MissingError) { $MissingError } else { $Message })
+    }
+    if (-not (Test-NvkInteractive)) {
+        Write-NvkError $(if ($MissingError) { $MissingError } else { $Message })
+    }
+    if ($list.Count -eq 1 -and -not $AllowCustom) {
+        Write-NvkInfo "using $($list[0].Label)"
+        return $list[0].Value
+    }
+
+    Write-Host ''
+    Write-NvkInfo $Message
+    $letterHint = ''
+    if ($list.Count -gt 0) {
+        $lastLetter = [char]([int][char]'a' + [Math]::Min($list.Count, 26) - 1)
+        $letterHint = ", a-$lastLetter"
+        for ($i = 0; $i -lt $list.Count; $i++) {
+            Write-Host ('  {0}) {1}' -f ($i + 1), $list[$i].Label)
+        }
+    }
+    $customHint = if ($AllowCustom -and $list.Count -gt 0) { ', or type a value' } else { '' }
+    $range = if ($list.Count -gt 0) { "1-$($list.Count)$letterHint" } else { 'a value' }
+    while ($true) {
+        $answer = $null
+        try {
+            $answer = Read-Host "$($script:NvkCmd): choose $range$customHint"
+        }
+        catch {
+            Write-NvkError 'no input (need a terminal, or pass the flags)'
+        }
+        $picked = Resolve-NvkMenuSelection -Text $answer -Choices $list -AllowCustom:$AllowCustom
+        if ($picked) { return $picked.Value }
+        Write-Host "$($script:NvkCmd): not a valid choice" -ForegroundColor Yellow
+    }
+}
+
+function Get-NvkFqdn {
+    if (Test-NvkCommandExists 'hostname') {
+        $prev = $PSNativeCommandUseErrorActionPreference
+        try {
+            $global:PSNativeCommandUseErrorActionPreference = $false
+            $fqdn = @(& hostname -f 2>$null) | Select-Object -First 1
+            if ($LASTEXITCODE -eq 0 -and $fqdn) {
+                $text = ([string]$fqdn).Trim()
+                if ($text) { return $text }
+            }
+        }
+        finally {
+            $global:PSNativeCommandUseErrorActionPreference = $prev
+        }
+    }
+    [System.Net.Dns]::GetHostName()
+}
+
+function Get-NvkListeningPorts {
+    $ports = [System.Collections.Generic.HashSet[int]]::new()
+    if (-not (Test-NvkCommandExists 'ss')) { return $ports }
+    $prev = $PSNativeCommandUseErrorActionPreference
+    try {
+        $global:PSNativeCommandUseErrorActionPreference = $false
+        $lines = @(& ss -lnt 2>$null)
+        if ($LASTEXITCODE -ne 0) { return $ports }
+        foreach ($line in $lines) {
+            if ($line -match ':(\d+)\s+\S+\s*$') {
+                [void]$ports.Add([int]$Matches[1])
+            }
+        }
+    }
+    finally {
+        $global:PSNativeCommandUseErrorActionPreference = $prev
+    }
+    $ports
+}
+
+function Get-NvkUsedPortSet {
+    $ports = [System.Collections.Generic.HashSet[int]]::new()
+    foreach ($row in @(Get-NvkStartup)) {
+        $envFile = Join-Path $row.Instance 'env'
+        $value = Get-NvkEnvValue $envFile 'PORT'
+        $parsed = 0
+        if ($value -and [int]::TryParse($value, [Globalization.NumberStyles]::Integer, [cultureinfo]::InvariantCulture, [ref]$parsed) -and $parsed -ge 1) {
+            [void]$ports.Add($parsed)
+        }
+    }
+    foreach ($p in Get-NvkListeningPorts) {
+        [void]$ports.Add($p)
+    }
+    ,$ports
+}
+
+function Get-NvkSuggestedPorts {
+    param(
+        [int]$Count = 3,
+        [int]$Start = 3000
+    )
+    $used = Get-NvkUsedPortSet
+    $out = [System.Collections.Generic.List[int]]::new()
+    $p = $Start
+    while ($out.Count -lt $Count -and $p -le 65535) {
+        if (-not $used.Contains($p)) { $out.Add($p) }
+        $p++
+    }
+    $out
+}
+
+function Get-NvkNginxSiteFiles {
+    $files = [System.Collections.Generic.List[string]]::new()
+    $seen = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $specs = @(
+        @{ Path = '/etc/nginx/sites-enabled'; Filter = '*' }
+        @{ Path = '/etc/nginx/sites-available'; Filter = '*' }
+        @{ Path = '/etc/nginx/conf.d'; Filter = '*.conf' }
+    )
+    foreach ($spec in $specs) {
+        if (-not (Test-Path -LiteralPath $spec.Path)) { continue }
+        Get-ChildItem -LiteralPath $spec.Path -File -Filter $spec.Filter -ErrorAction SilentlyContinue | ForEach-Object {
+            $full = $_.FullName
+            $key = $full
+            try { $key = (Resolve-Path -LiteralPath $full).Path } catch { $key = $full }
+            if ($seen.Add($key)) { $files.Add($full) }
+        }
+    }
+    @($files)
+}
+
+function Resolve-NvkAppIdParam {
+    param([string]$AppId)
+    if (-not [string]::IsNullOrWhiteSpace($AppId)) {
+        return $AppId.Trim()
+    }
+    $ids = @(Get-NvkFamilyAppIds)
+    if ($ids.Count -eq 0) {
+        Write-NvkError '-App is required (no app profiles in this kit). If this is a new app, run nvk-update to fetch profiles.'
+    }
+    $choices = @($ids | ForEach-Object { New-NvkChoice -Label $_ -Value $_ })
+    $available = $ids -join ' '
+    Read-NvkChoice `
+        -Message '-App is required. Select an app.' `
+        -Choices $choices `
+        -MissingError "-App is required. Available: $available"
+}
+
+function Resolve-NvkInstanceNameParam {
+    param(
+        [Parameter(Mandatory)][string]$AppId,
+        [string]$Name,
+        [Parameter(Mandatory)][ValidateSet('New', 'Existing')][string]$For
+    )
+    if (-not [string]::IsNullOrWhiteSpace($Name)) {
+        Assert-NvkName $Name
+        return $Name
+    }
+
+    $rows = @(Get-NvkStartup -AppId $AppId)
+    $taken = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($row in $rows) { [void]$taken.Add($row.Name) }
+
+    if ($For -eq 'Existing') {
+        $names = @(
+            $rows |
+                Where-Object { Test-Path -LiteralPath (Join-Path $_.Instance 'env') } |
+                ForEach-Object { $_.Name } |
+                Sort-Object -Unique
+        )
+        if ($names.Count -eq 0) {
+            Write-NvkError "-Name is required (no installed instances of $AppId)"
+        }
+        $choices = @($names | ForEach-Object { New-NvkChoice -Label $_ -Value $_ })
+        return (Read-NvkChoice `
+                -Message "-Name is required. Select a $AppId instance." `
+                -Choices $choices `
+                -MissingError "-Name is required. Instances: $($names -join ' ')")
+    }
+
+    $suggestions = [System.Collections.Generic.List[string]]::new()
+    foreach ($candidate in @('www', 'test')) {
+        if (-not $taken.Contains($candidate)) { $suggestions.Add($candidate) }
+    }
+    $choices = @($suggestions | ForEach-Object { New-NvkChoice -Label $_ -Value $_ })
+    while ($true) {
+        $picked = Read-NvkChoice `
+            -Message '-Name is required. Select one, or type a new instance name.' `
+            -Choices $choices `
+            -AllowCustom `
+            -MissingError '-Name is required'
+        $picked = [string]$picked
+        if (-not (Test-NvkName $picked)) {
+            if (-not (Test-NvkInteractive)) {
+                Write-NvkError '-Name must be letters, digits, hyphen, or underscore'
+            }
+            Write-Host "$($script:NvkCmd): -Name must be letters, digits, hyphen, or underscore" -ForegroundColor Yellow
+            continue
+        }
+        if ($taken.Contains($picked)) {
+            if (-not (Test-NvkInteractive)) {
+                Write-NvkError "instance '$picked' already exists (use $AppId-update to upgrade)"
+            }
+            Write-Host "$($script:NvkCmd): instance '$picked' already exists" -ForegroundColor Yellow
+            continue
+        }
+        return $picked
+    }
+}
+
+function Resolve-NvkPortParam {
+    param([int]$Port)
+    if ($Port -ne 0) {
+        Assert-NvkPort $Port
+        return $Port
+    }
+    $used = Get-NvkUsedPortSet
+    $choices = [System.Collections.Generic.List[object]]::new()
+    foreach ($p in (Get-NvkSuggestedPorts)) {
+        $choices.Add((New-NvkChoice -Label "$p" -Value $p))
+    }
+    while ($true) {
+        $picked = Read-NvkChoice `
+            -Message '-Port is required. Select a free port, or type one.' `
+            -Choices $choices `
+            -AllowCustom `
+            -MissingError '-Port is required'
+        $parsed = 0
+        if (-not [int]::TryParse([string]$picked, [Globalization.NumberStyles]::Integer, [cultureinfo]::InvariantCulture, [ref]$parsed)) {
+            if (-not (Test-NvkInteractive)) { Write-NvkError '-Port must be an integer' }
+            Write-Host "$($script:NvkCmd): -Port must be an integer" -ForegroundColor Yellow
+            continue
+        }
+        if ($parsed -lt 1 -or $parsed -gt 65535) {
+            if (-not (Test-NvkInteractive)) { Write-NvkError '-Port out of range' }
+            Write-Host "$($script:NvkCmd): -Port out of range" -ForegroundColor Yellow
+            continue
+        }
+        if ($used.Contains($parsed)) {
+            if (-not (Test-NvkInteractive)) { Write-NvkError "-Port $parsed is already in use" }
+            Write-Host "$($script:NvkCmd): port $parsed is already in use" -ForegroundColor Yellow
+            continue
+        }
+        return $parsed
+    }
+}
+
+function Resolve-NvkNginxInstallParams {
+    param(
+        [string]$ServerName,
+        [string]$NginxSite,
+        [string]$BasePath,
+        [switch]$SkipNginx,
+        [string]$InstanceName
+    )
+    if ($SkipNginx) {
+        return [pscustomobject]@{
+            ServerName = ''
+            NginxSite  = ''
+            BasePath   = ''
+            SkipNginx  = $true
+        }
+    }
+
+    $server = if ($ServerName) { $ServerName.Trim() } else { '' }
+    $site = if ($NginxSite) { $NginxSite.Trim() } else { '' }
+    $path = if ($BasePath) { $BasePath.Trim('/') } else { '' }
+
+    if ($server -and $site) {
+        Write-NvkError 'use either -ServerName (new site) or -NginxSite (path mount), not both'
+    }
+    if ($server -and $path) {
+        Write-NvkError '-ServerName installs the app at /; omit -BasePath (use -NginxSite for /name/)'
+    }
+
+    if (-not $server -and -not $site) {
+        $mode = Read-NvkChoice `
+            -Message 'How should nginx expose this instance?' `
+            -Choices @(
+                (New-NvkChoice -Label 'dedicated hostname (new site)' -Value 'hostname')
+                (New-NvkChoice -Label 'path on an existing site' -Value 'path')
+                (New-NvkChoice -Label 'skip nginx' -Value 'skip')
+            ) `
+            -MissingError 'provide -ServerName HOST or -NginxSite FILE (or -SkipNginx)'
+        if ($mode -eq 'skip') {
+            return [pscustomobject]@{
+                ServerName = ''
+                NginxSite  = ''
+                BasePath   = ''
+                SkipNginx  = $true
+            }
+        }
+        if ($mode -eq 'hostname') {
+            $hostChoices = [System.Collections.Generic.List[object]]::new()
+            $fqdn = Get-NvkFqdn
+            if ($fqdn) {
+                $hostChoices.Add((New-NvkChoice -Label $fqdn -Value $fqdn))
+                if ($fqdn -notlike 'www.*') {
+                    $hostChoices.Add((New-NvkChoice -Label "www.$fqdn" -Value "www.$fqdn"))
+                }
+            }
+            $server = [string](Read-NvkChoice `
+                    -Message '-ServerName is required. Select a hostname, or type one.' `
+                    -Choices @($hostChoices) `
+                    -AllowCustom `
+                    -MissingError 'provide -ServerName HOST or -NginxSite FILE (or -SkipNginx)')
+            $server = $server.Trim()
+            if (-not $server) {
+                Write-NvkError '-ServerName is required'
+            }
+        }
+        else {
+            $sites = @(Get-NvkNginxSiteFiles)
+            $siteChoices = @($sites | ForEach-Object { New-NvkChoice -Label $_ -Value $_ })
+            $site = [string](Read-NvkChoice `
+                    -Message '-NginxSite is required. Select a site file, or type a path.' `
+                    -Choices $siteChoices `
+                    -AllowCustom `
+                    -MissingError '-NginxSite requires a site file path')
+            $site = $site.Trim()
+        }
+    }
+
+    if ($site -and -not $path) {
+        $pathChoices = [System.Collections.Generic.List[object]]::new()
+        if ($InstanceName -and (Test-NvkName $InstanceName)) {
+            $pathChoices.Add((New-NvkChoice -Label $InstanceName -Value $InstanceName))
+        }
+        $path = [string](Read-NvkChoice `
+                -Message '-BasePath is required for a path mount. Select one, or type a URL prefix (no leading slash).' `
+                -Choices @($pathChoices) `
+                -AllowCustom `
+                -MissingError '-NginxSite requires -BasePath (path mounts need a URL prefix)')
+        $path = $path.Trim('/')
+        if (-not $path) {
+            Write-NvkError '-NginxSite requires -BasePath (path mounts need a URL prefix)'
+        }
+    }
+
+    [pscustomobject]@{
+        ServerName = $server
+        NginxSite  = $site
+        BasePath   = $path
+        SkipNginx  = $false
+    }
+}
+
+function Resolve-NvkStartupTarget {
+    param(
+        [string]$AppId,
+        [string]$Name,
+        [Parameter(Mandatory)][ValidateSet('Add', 'Remove')][string]$Action
+    )
+    $app = if ($AppId) { $AppId.Trim() } else { '' }
+    $inst = if ($Name) { $Name.Trim() } else { '' }
+    if ($inst) { Assert-NvkName $inst }
+
+    if ($app -and $inst) {
+        return [pscustomobject]@{ AppId = $app; Name = $inst }
+    }
+
+    $rows = @(Get-NvkStartup)
+    if ($Action -eq 'Remove') {
+        $rows = @($rows | Where-Object { $_.Present })
+    }
+    else {
+        $rows = @(
+            $rows |
+                Where-Object { -not $_.Present } |
+                Where-Object { Test-Path -LiteralPath (Join-Path $_.Instance 'env') }
+        )
+    }
+    if ($app) { $rows = @($rows | Where-Object { $_.App -eq $app }) }
+    if ($inst) { $rows = @($rows | Where-Object { $_.Name -eq $inst }) }
+
+    if ($rows.Count -eq 0) {
+        $need = if (-not $app -and -not $inst) { '-App and -Name are required' } elseif (-not $app) { '-App is required' } else { '-Name is required' }
+        Write-NvkError "$need (no instances available to $($Action.ToLowerInvariant()))"
+    }
+
+    $choices = @(
+        $rows | Sort-Object App, Name | ForEach-Object {
+            New-NvkChoice -Label "$($_.App) / $($_.Name)" -Value $_
+        }
+    )
+    $picked = Read-NvkChoice `
+        -Message "-$Action needs an instance. Select one." `
+        -Choices $choices `
+        -MissingError "-App and -Name are required for -$Action"
+    [pscustomobject]@{ AppId = $picked.App; Name = $picked.Name }
 }
 
 function Install-NvkAppInstance {

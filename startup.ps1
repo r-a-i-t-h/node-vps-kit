@@ -12,6 +12,8 @@ nginx are left in place. -Add recreates the unit from the template and enable --
 sudo nvk-startup
 sudo nvk-startup -Remove -App proseden -Name www
 sudo nvk-startup -Add -App proseden -Name www
+sudo nvk-startup -Remove
+# On a terminal, missing -App/-Name are chosen from a numbered menu.
 #>
 [CmdletBinding(DefaultParameterSetName = 'List')]
 param(
@@ -25,13 +27,13 @@ param(
     [switch]$Add,
 
     [Parameter(ParameterSetName = 'List')]
-    [Parameter(ParameterSetName = 'Remove', Mandatory)]
-    [Parameter(ParameterSetName = 'Add', Mandatory)]
+    [Parameter(ParameterSetName = 'Remove')]
+    [Parameter(ParameterSetName = 'Add')]
     [string]$App,
 
     [Parameter(ParameterSetName = 'List')]
-    [Parameter(ParameterSetName = 'Remove', Mandatory)]
-    [Parameter(ParameterSetName = 'Add', Mandatory)]
+    [Parameter(ParameterSetName = 'Remove')]
+    [Parameter(ParameterSetName = 'Add')]
     [string]$Name
 )
 
@@ -63,10 +65,12 @@ Import-Module (Join-Path $moduleRoot 'Nvk.psm1') -Force
 Set-NvkCommand 'startup'
 
 if ($Remove) {
-    Remove-NvkStartup -AppId $App -Name $Name
+    $target = Resolve-NvkStartupTarget -AppId $App -Name $Name -Action Remove
+    Remove-NvkStartup -AppId $target.AppId -Name $target.Name
 }
 elseif ($Add) {
-    Add-NvkStartup -AppId $App -Name $Name
+    $target = Resolve-NvkStartupTarget -AppId $App -Name $Name -Action Add
+    Add-NvkStartup -AppId $target.AppId -Name $target.Name
 }
 else {
     Write-NvkStartupTable (Get-NvkStartup -AppId $App -Name $Name)

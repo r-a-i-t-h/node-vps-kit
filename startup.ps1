@@ -50,12 +50,17 @@ elseif (Test-Path -LiteralPath '/usr/local/lib/node-vps-kit/Nvk.psm1') {
 }
 
 if (-not $moduleRoot) {
-    throw 'startup: kit not found (install an app first, or set NVK_ROOT)'
+    $repo = if ($env:KIT_REPO) { $env:KIT_REPO } else { 'r-a-i-t-h/node-vps-kit' }
+    $ref = if ($env:KIT_REF) { $env:KIT_REF } else { 'main' }
+    throw @"
+startup: kit not found. Install the kit first:
+
+  curl -fsSL https://raw.githubusercontent.com/$repo/$ref/bootstrap.ps1 | sudo pwsh -File -
+"@
 }
 
 Import-Module (Join-Path $moduleRoot 'Nvk.psm1') -Force
 Set-NvkCommand 'startup'
-Invoke-NvkSelfUpdateIfPossible -EntryName 'startup.ps1' -BoundParameters $PSBoundParameters -ScriptRoot $PSScriptRoot
 
 if ($Remove) {
     Remove-NvkStartup -AppId $App -Name $Name

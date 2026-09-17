@@ -6,11 +6,10 @@ This repo is the operator tool for a family of apps. Profiles live here
 (`apps/<id>.psd1`); the kit is allowed to know those apps. Operators never clone
 an app git tree onto the server.
 
-The kit itself is **one copy** on the box (`/usr/local/lib/node-vps-kit`). It
-refreshes from GitHub at the start of each command when possible, and keeps
-working offline from that last copy if GitHub is unreachable. App instances are
-the opposite: many named installs, each with its own code tree so they can run
-different versions.
+The kit itself is **one copy** on the box (`/usr/local/lib/node-vps-kit`).
+Install it once, then use it to install apps. It stays at that revision until
+you explicitly run `nvk-update`. App instances are the opposite: many named
+installs, each with its own code tree so they can run different versions.
 
 ## Requirements
 
@@ -22,41 +21,48 @@ different versions.
 
 Optional: `sudo snap refresh --hold powershell` after a known-good revision.
 
-## Install an app
+## Install the kit
 
 ```bash
 sudo snap install powershell --classic
 
-curl -fsSL https://raw.githubusercontent.com/r-a-i-t-h/node-vps-kit/main/install.ps1 \
-  | sudo pwsh -File - \
-      -App proseden \
-      -Name www \
-      -ServerName www.proseden.co.uk \
-      -Port 3336
+curl -fsSL https://raw.githubusercontent.com/r-a-i-t-h/node-vps-kit/main/bootstrap.ps1 |
+  sudo pwsh -File -
 ```
 
-If piping arguments is awkward on your host:
+If piping is awkward on your host:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/r-a-i-t-h/node-vps-kit/main/install.ps1 \
-  -o /tmp/nvk-install.ps1
-sudo pwsh -File /tmp/nvk-install.ps1 \
-  -App proseden -Name www -ServerName www.proseden.co.uk -Port 3336
+curl -fsSL https://raw.githubusercontent.com/r-a-i-t-h/node-vps-kit/main/bootstrap.ps1 \
+  -o /tmp/nvk-bootstrap.ps1
+sudo pwsh -File /tmp/nvk-bootstrap.ps1
+```
+
+That writes `/usr/local/lib/node-vps-kit` and PATH wrappers:
+
+- `/usr/local/sbin/nvk-update` — refresh this kit (and app profiles)
+- `/usr/local/sbin/nvk-startup`
+- `/usr/local/sbin/<app>-install` / `<app>-update` for each profile in `apps/`
+
+Wrappers use `#!/snap/bin/pwsh`.
+
+## Install an app
+
+The kit must already be on the box.
+
+```bash
+sudo proseden-install -Name www -ServerName www.proseden.co.uk -Port 3336
 ```
 
 That command:
 
-1. Fetches this kit (when piped) or uses a local checkout / `/usr/local/lib/node-vps-kit`.
-2. Loads `apps/proseden.psd1`.
-3. Downloads the app’s GitHub Release (`.tar.gz` or `.zip`), with a shared cache of the last 3 fetched tags per app under `/var/cache/node-vps-kit/`.
-4. Unpacks under `/opt/<app>/<name>/releases/<tag>` and points `current` at it.
-5. Creates empty `data/` (the app may seed on first boot), writes `env`, systemd unit, nginx.
-6. Installs the kit to `/usr/local/lib/node-vps-kit` and wrappers:
-   - `/usr/local/sbin/<app>-install`
-   - `/usr/local/sbin/<app>-update`
-   - `/usr/local/sbin/nvk-startup`
+1. Loads `apps/proseden.psd1` from the local kit.
+2. Downloads the app’s GitHub Release (`.tar.gz` or `.zip`), with a shared cache of the last 3 fetched tags per app under `/var/cache/node-vps-kit/`.
+3. Unpacks under `/opt/<app>/<name>/releases/<tag>` and points `current` at it.
+4. Creates empty `data/` (the app may seed on first boot), writes `env`, systemd unit, nginx.
 
-Wrappers use `#!/snap/bin/pwsh`.
+It does **not** refresh the kit. If the app profile is missing, update the kit
+first (`sudo nvk-update`).
 
 ### Subdomain vs path mount
 
@@ -81,6 +87,24 @@ Instance `releases/` keeps the current and previous unpacked trees.
 If GitHub is down and that tag is among the last 3 cached downloads, the update
 still runs. Offline `-Version latest` uses the most recently fetched cached tag
 (and says so).
+
+App update does **not** refresh the kit.
+
+## Update the kit
+
+```bash
+sudo nvk-update
+```
+
+Fetches `KIT_REPO` @ `KIT_REF` (default `r-a-i-t-h/node-vps-kit` / `main`),
+replaces `/usr/local/lib/node-vps-kit`, and rewrites wrappers. New `apps/*.psd1`
+profiles show up here — run this before installing an app the local kit does
+not yet know.
+
+Private GitHub repos: export `GITHUB_TOKEN` with read access.
+
+If a kit update installs a broken copy, recover with another `curl | sudo pwsh`
+of `bootstrap.ps1` from GitHub (there is no kit version history).
 
 ## Boot units (startup)
 
@@ -107,9 +131,10 @@ nginx stay. `-Add` writes the unit from the template again and `enable --now`.
   env                  # PORT, <PREFIX>_DATA, … — survives updates
 
 /usr/local/lib/node-vps-kit/   # this kit (one copy)
+/usr/local/sbin/nvk-update
+/usr/local/sbin/nvk-startup
 /usr/local/sbin/<app>-install
 /usr/local/sbin/<app>-update
-/usr/local/sbin/nvk-startup
 
 /var/cache/node-vps-kit/<app>/<tag>/   # last 3 downloaded archives per app
 ```
@@ -137,6 +162,8 @@ Add `apps/<id>.psd1` in this repo:
     PostInstallNote = 'Optional note printed after install'
 }
 ```
+
+Operators pick up a new profile with `sudo nvk-update`.
 
 ### Release archive contract
 
@@ -167,21 +194,20 @@ Updates never rewrite `env` except refreshing the `_SEED` path to the new tree.
 
 ## Local development of the kit
 
+Install a checkout onto the VPS (does not fetch GitHub):
+
+```bash
+sudo NVK_ROOT=/path/to/node-vps-kit \
+  pwsh -File /path/to/node-vps-kit/bootstrap.ps1
+```
+
+Run app install/update from that checkout without copying it:
+
 ```bash
 sudo NVK_ROOT=/path/to/node-vps-kit \
   pwsh -File /path/to/node-vps-kit/install.ps1 \
     -App proseden -Name www -ServerName www.example.com -Port 3336
 ```
 
-`NVK_ROOT` skips GitHub self-update so you run the checkout. Running
-`install.ps1` / `update.ps1` / `startup.ps1` from a git checkout (not from
-`/usr/local/lib/node-vps-kit`) also skips the refresh.
-
-`KIT_REPO` / `KIT_REF` (default `r-a-i-t-h/node-vps-kit` / `main`) control which
-kit revision is fetched when the installed copy refreshes or when `install.ps1`
-is piped.
-
-Private GitHub repos: export `GITHUB_TOKEN` with read access.
-
-If a self-update installs a broken kit, recover with another `curl | sudo pwsh`
-of `install.ps1` from GitHub (there is no kit version history).
+`KIT_REPO` / `KIT_REF` control which revision `nvk-update` and a piped
+`bootstrap.ps1` fetch.

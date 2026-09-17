@@ -6,7 +6,8 @@ Update one app instance to a GitHub Release.
 
 .DESCRIPTION
 Backs up data/, swaps the app tree, runs optional deploy/post-update.sh, restarts
-systemd. Does not rewrite instance data (except the seed path).
+systemd. Does not rewrite instance data (except the seed path). Does not update
+this kit — run nvk-update for that.
 
 .EXAMPLE
 sudo proseden-update -Name test
@@ -42,12 +43,17 @@ elseif (Test-Path -LiteralPath '/usr/local/lib/node-vps-kit/Nvk.psm1') {
 }
 
 if (-not $moduleRoot) {
-    throw 'update: kit not found (install an app first, or set NVK_ROOT)'
+    $repo = if ($env:KIT_REPO) { $env:KIT_REPO } else { 'r-a-i-t-h/node-vps-kit' }
+    $ref = if ($env:KIT_REF) { $env:KIT_REF } else { 'main' }
+    throw @"
+update: kit not found. Install the kit first:
+
+  curl -fsSL https://raw.githubusercontent.com/$repo/$ref/bootstrap.ps1 | sudo pwsh -File -
+"@
 }
 
 Import-Module (Join-Path $moduleRoot 'Nvk.psm1') -Force
 Set-NvkCommand 'update'
-Invoke-NvkSelfUpdateIfPossible -EntryName 'update.ps1' -BoundParameters $PSBoundParameters -ScriptRoot $PSScriptRoot
 
 Update-NvkAppInstance `
     -AppId $App `

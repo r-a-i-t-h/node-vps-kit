@@ -1,4 +1,4 @@
-# Shared helpers for node-vps-kit. Dot-sourced by install.ps1 / update.ps1 / startup.ps1.
+# Shared helpers for node-vps-kit. Used by bootstrap.ps1, install.ps1, update.ps1, startup.ps1.
 
 Set-StrictMode -Version Latest
 
@@ -8,7 +8,7 @@ $script:NvkCacheKeep = 3
 $script:NvkSbinDir = '/usr/local/sbin'
 $script:NvkSnapPwsh = '/snap/bin/pwsh'
 $script:NvkUtf8 = [System.Text.UTF8Encoding]::new($false)
-$script:NvkKitRoot = $null
+$script:NvkKitRoot = $PSScriptRoot
 $script:NvkCmd = 'nvk'
 
 function Set-NvkCommand {
@@ -43,23 +43,6 @@ function Get-NvkPwshPath {
     $cmd = Get-Command pwsh -ErrorAction SilentlyContinue
     if ($cmd) { return $cmd.Source }
     Write-NvkError 'pwsh not found (install: sudo snap install powershell --classic)'
-}
-
-function ConvertTo-NvkArgumentList {
-    param([hashtable]$BoundParameters)
-    $list = [System.Collections.Generic.List[string]]::new()
-    if (-not $BoundParameters) { return @() }
-    foreach ($key in $BoundParameters.Keys) {
-        $value = $BoundParameters[$key]
-        if ($value -is [System.Management.Automation.SwitchParameter]) {
-            if ($value.IsPresent) { $list.Add("-$key") }
-            continue
-        }
-        if ($null -eq $value -or ($value -is [string] -and $value -eq '')) { continue }
-        $list.Add("-$key")
-        $list.Add([string]$value)
-    }
-    $list.ToArray()
 }
 
 function Invoke-NvkNative {
@@ -166,16 +149,37 @@ function Get-NvkKitFromGitHub {
     Write-NvkInfo "fetching kit $repo@$ref"
     $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("nvk-kit-" + [guid]::NewGuid().ToString('n'))
     New-Item -ItemType Directory -Path $tmp -Force | Out-Null
-    $zip = Join-Path $tmp 'kit.zip'
-    Save-NvkGitHubDownload -Url $url -Destination $zip
-    $extract = Join-Path $tmp 'extract'
-    New-Item -ItemType Directory -Path $extract -Force | Out-Null
-    Expand-Archive -LiteralPath $zip -DestinationPath $extract -Force
-    $root = Find-NvkUnpackedKit $extract
-    if (-not $root) {
-        Write-NvkError "kit archive missing Nvk.psm1 ($url)"
+    try {
+        $zip = Join-Path $tmp 'kit.zip'
+        Save-NvkGitHubDownload -Url $url -Destination $zip
+        $extract = Join-Path $tmp 'extract'
+        New-Item -ItemType Directory -Path $extract -Force | Out-Null
+        Expand-Archive -LiteralPath $zip -DestinationPath $extract -Force
+        $root = Find-NvkUnpackedKit $extract
+        if (-not $root) {
+            Write-NvkError "kit archive missing Nvk.psm1 ($url)"
+        }
+        [pscustomobject]@{
+            KitRoot = $root
+            TempDir = $tmp
+        }
     }
-    $root
+    catch {
+        Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
+        throw
+    }
+}
+
+function Test-NvkIsInstalledKitRoot {
+    param([Parameter(Mandatory)][string]$Root)
+    try {
+        $a = [System.IO.Path]::GetFullPath($Root).TrimEnd('/', '\')
+        $b = [System.IO.Path]::GetFullPath($script:NvkKitLibDir).TrimEnd('/', '\')
+        return $a -eq $b
+    }
+    catch {
+        return $false
+    }
 }
 
 function Get-NvkFamilyAppIds {
@@ -208,44 +212,45 @@ function New-NvkWrapperScript {
 
 function Install-NvkKitAndWrappers {
     param(
-        [Parameter(Mandatory)][string]$Source,
-        [string]$AppId
+        [Parameter(Mandatory)][string]$Source
     )
     $lib = $script:NvkKitLibDir
+    Assert-NvkRoot
     Write-NvkInfo "installing kit to $lib"
     New-Item -ItemType Directory -Path $lib -Force | Out-Null
-    foreach ($name in @('install.ps1', 'update.ps1', 'startup.ps1', 'Nvk.psm1', 'README.md')) {
-        $src = Join-Path $Source $name
-        if (Test-Path -LiteralPath $src) {
-            Copy-Item -LiteralPath $src -Destination (Join-Path $lib $name) -Force
-        }
-    }
-    foreach ($dirName in @('apps', 'templates')) {
-        $src = Join-Path $Source $dirName
-        if (Test-Path -LiteralPath $src) {
-            $dest = Join-Path $lib $dirName
-            if (Test-Path -LiteralPath $dest) {
-                Remove-Item -LiteralPath $dest -Recurse -Force
+    if (-not (Test-NvkIsInstalledKitRoot $Source)) {
+        foreach ($name in @('bootstrap.ps1', 'install.ps1', 'update.ps1', 'startup.ps1', 'Nvk.psm1', 'README.md')) {
+            $src = Join-Path $Source $name
+            if (Test-Path -LiteralPath $src) {
+                Copy-Item -LiteralPath $src -Destination (Join-Path $lib $name) -Force
             }
-            Copy-Item -LiteralPath $src -Destination $dest -Recurse -Force
         }
-    }
-    foreach ($stale in @('install.sh', 'update.sh', 'lib', 'apps/proseden.conf')) {
-        $path = Join-Path $lib $stale
-        if (Test-Path -LiteralPath $path) {
-            Remove-Item -LiteralPath $path -Recurse -Force
+        foreach ($dirName in @('apps', 'templates')) {
+            $src = Join-Path $Source $dirName
+            if (Test-Path -LiteralPath $src) {
+                $dest = Join-Path $lib $dirName
+                if (Test-Path -LiteralPath $dest) {
+                    Remove-Item -LiteralPath $dest -Recurse -Force
+                }
+                Copy-Item -LiteralPath $src -Destination $dest -Recurse -Force
+            }
         }
-    }
-    foreach ($entry in @('install.ps1', 'update.ps1', 'startup.ps1')) {
-        $p = Join-Path $lib $entry
-        if (Test-Path -LiteralPath $p) {
-            Invoke-NvkNative -Command @('chmod', '755', $p) | Out-Null
+        foreach ($stale in @('install.sh', 'update.sh', 'lib', 'apps/proseden.conf')) {
+            $path = Join-Path $lib $stale
+            if (Test-Path -LiteralPath $path) {
+                Remove-Item -LiteralPath $path -Recurse -Force
+            }
+        }
+        foreach ($entry in @('bootstrap.ps1', 'install.ps1', 'update.ps1', 'startup.ps1')) {
+            $p = Join-Path $lib $entry
+            if (Test-Path -LiteralPath $p) {
+                Invoke-NvkNative -Command @('chmod', '755', $p) | Out-Null
+            }
         }
     }
 
     New-Item -ItemType Directory -Path $script:NvkSbinDir -Force | Out-Null
     $ids = @(Get-NvkFamilyAppIds -KitRoot $Source)
-    if ($AppId -and $ids -notcontains $AppId) { $ids += $AppId }
     foreach ($id in $ids) {
         $installWrap = Join-Path $script:NvkSbinDir "$id-install"
         $updateWrap = Join-Path $script:NvkSbinDir "$id-update"
@@ -256,69 +261,50 @@ function Install-NvkKitAndWrappers {
     }
 
     $startupWrap = Join-Path $script:NvkSbinDir 'nvk-startup'
+    $kitUpdateWrap = Join-Path $script:NvkSbinDir 'nvk-update'
     Write-NvkFile $startupWrap (New-NvkWrapperScript -Target "$lib/startup.ps1")
+    Write-NvkFile $kitUpdateWrap (New-NvkWrapperScript -Target "$lib/bootstrap.ps1")
     Invoke-NvkNative -Command @('chmod', '755', $startupWrap) | Out-Null
+    Invoke-NvkNative -Command @('chmod', '755', $kitUpdateWrap) | Out-Null
+
+    $appList = if ($ids.Count) { $ids -join ', ' } else { '(none)' }
     Write-NvkInfo "installed wrappers in $($script:NvkSbinDir)"
+    Write-NvkInfo "registered apps: $appList"
 }
 
-function Invoke-NvkSelfUpdateIfPossible {
-    param(
-        [Parameter(Mandatory)][string]$EntryName,
-        [hashtable]$BoundParameters,
-        [string]$ScriptRoot
-    )
-    if ($env:NVK_ROOT -and (Test-Path -LiteralPath (Join-Path $env:NVK_ROOT 'Nvk.psm1'))) {
-        $script:NvkKitRoot = $env:NVK_ROOT
-        return
-    }
-    if ($env:NVK_REFRESHED -eq '1') {
-        $script:NvkKitRoot = if ($ScriptRoot) { $ScriptRoot } else { $script:NvkKitLibDir }
-        Install-NvkKitAndWrappers -Source $script:NvkKitRoot
-        return
+function Update-NvkKit {
+    Assert-NvkRoot
+    $source = $script:NvkKitRoot
+    if (-not $source -or -not (Test-Path -LiteralPath (Join-Path $source 'Nvk.psm1'))) {
+        Write-NvkError 'kit source not found'
     }
 
-    $localRoot = $null
-    if ($ScriptRoot -and (Test-Path -LiteralPath (Join-Path $ScriptRoot 'Nvk.psm1'))) {
-        $localRoot = $ScriptRoot
-    }
-    elseif (Test-Path -LiteralPath (Join-Path $script:NvkKitLibDir 'Nvk.psm1')) {
-        $localRoot = $script:NvkKitLibDir
-    }
-
-    $isInstalledCopy = $localRoot -and (
-        [System.IO.Path]::GetFullPath($localRoot).TrimEnd('/\') -eq
-        [System.IO.Path]::GetFullPath($script:NvkKitLibDir).TrimEnd('/\')
-    )
-
-    if ($localRoot -and -not $isInstalledCopy) {
-        $script:NvkKitRoot = $localRoot
+    # A GitHub fetch already unpacked this tree, or this is a checkout / NVK_ROOT.
+    # Only the installed copy at /usr/local/lib/node-vps-kit pulls upstream.
+    if ($env:NVK_REFRESHED -eq '1' -or -not (Test-NvkIsInstalledKitRoot $source)) {
+        Install-NvkKitAndWrappers -Source $source
         return
     }
 
-    $tmpRoot = $null
+    $fetched = $null
     try {
-        $tmpRoot = Get-NvkKitFromGitHub
-    }
-    catch {
-        if ($localRoot) {
-            Write-NvkInfo "warning: could not refresh kit from GitHub; using on-disk copy ($($_.Exception.Message))"
-            $script:NvkKitRoot = $localRoot
-            return
+        $fetched = Get-NvkKitFromGitHub
+        $env:NVK_REFRESHED = '1'
+        $target = Join-Path $fetched.KitRoot 'bootstrap.ps1'
+        if (-not (Test-Path -LiteralPath $target)) {
+            Write-NvkError 'refreshed kit missing bootstrap.ps1'
         }
-        throw
+        $pwsh = Get-NvkPwshPath
+        & $pwsh -NoProfile -File $target
+        $code = $LASTEXITCODE
+        if ($null -eq $code) { $code = 0 }
+        exit $code
     }
-
-    $env:NVK_REFRESHED = '1'
-    $target = Join-Path $tmpRoot $EntryName
-    if (-not (Test-Path -LiteralPath $target)) {
-        Write-NvkError "refreshed kit missing $EntryName"
+    finally {
+        if ($fetched -and $fetched.TempDir -and (Test-Path -LiteralPath $fetched.TempDir)) {
+            Remove-Item -LiteralPath $fetched.TempDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
     }
-    $pwsh = Get-NvkPwshPath
-    $argList = ConvertTo-NvkArgumentList $BoundParameters
-    & $pwsh -NoProfile -File $target @argList
-    $code = $LASTEXITCODE
-    if ($null -eq $code) { $code = 0 }
-    exit $code
 }
 
 function Import-NvkApp {
@@ -326,7 +312,8 @@ function Import-NvkApp {
     $conf = Join-Path $script:NvkKitRoot "apps/$AppId.psd1"
     if (-not (Test-Path -LiteralPath $conf)) {
         $available = (Get-NvkFamilyAppIds) -join ' '
-        Write-NvkError "unknown app '$AppId' (no $conf). Available: $available"
+        if (-not $available) { $available = '(none)' }
+        Write-NvkError "unknown app '$AppId' (no $conf). Available: $available. If this is a new app, run nvk-update to fetch profiles."
     }
     $raw = Import-PowerShellDataFile -Path $conf
     if (-not $raw.AppId) { Write-NvkError "app profile missing AppId" }
@@ -1194,7 +1181,6 @@ function Install-NvkAppInstance {
 
     Write-NvkSystemdUnit -App $app -Name $Name -Prefix $app.Prefix -User $app.User -Node $node | Out-Null
     Start-NvkSystemdService $service
-    Install-NvkKitAndWrappers -Source $script:NvkKitRoot -AppId $app.AppId
 
     if (-not $SkipNginx) {
         Initialize-NvkHttpIncludes
@@ -1285,7 +1271,6 @@ function Update-NvkAppInstance {
     $prev = Get-NvkCurrentTag $instance
     if ($prev -eq $tag -and -not $Archive) {
         Write-NvkInfo "already on $tag — nothing to do"
-        Install-NvkKitAndWrappers -Source $script:NvkKitRoot -AppId $app.AppId
         return
     }
 
@@ -1319,7 +1304,6 @@ function Update-NvkAppInstance {
 
     Invoke-NvkPostUpdateHook -App $app -Instance $instance -Data $data -Backup $backup -Tag $tag -RunUser $runUser
     Restart-NvkSystemdService $service
-    Install-NvkKitAndWrappers -Source $script:NvkKitRoot -AppId $app.AppId
     Remove-NvkOldReleases -Releases $releases -Keep @($tag, $prev)
     Write-NvkInfo "updated $Name to $tag (data untouched: $data)"
     Write-NvkInfo "status: systemctl status $service"

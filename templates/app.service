@@ -1,0 +1,18 @@
+[Unit]
+Description=__APP__ (__NAME__)
+After=network.target
+
+[Service]
+Type=simple
+User=__USER__
+Group=__USER__
+WorkingDirectory=__PREFIX__/__NAME__/current
+EnvironmentFile=__PREFIX__/__NAME__/env
+ExecStart=__NODE__ __SERVER_ENTRY__
+Restart=on-failure
+RestartSec=3
+# File-backed data; give writes a moment to finish on stop
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target

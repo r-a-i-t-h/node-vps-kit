@@ -1,0 +1,39 @@
+# Lima instance for testing node-vps-kit on real Ubuntu (systemd + snap).
+# Start with: ./scripts/lima-up.sh
+#
+# Uses a local Ubuntu 26.04 cloud image — lima-up.sh points images.location
+# at that file so Lima does not fetch one. Do not switch this to
+# template://ubuntu (that pulls extra archives).
+
+vmType: vz
+
+cpus: 2
+memory: "4GiB"
+disk: "40GiB"
+
+images:
+  - location: "~/Downloads/ubuntu-26.04-server-cloudimg-arm64.img"
+    arch: "aarch64"
+
+# No containerd/nerdctl (avoids another large GitHub download).
+containerd:
+  system: false
+  user: false
+
+# Home is the same path as on the Mac (read-only). Kit writes go to /opt, /etc, /usr/local.
+mounts:
+  - location: "~"
+    writable: false
+
+# Guest IP reachable from the Mac (no sudo / socket_vmnet).
+networks:
+  - vzNAT: true
+
+# Guest nginx :80/:443 → Mac localhost. hostIP 0.0.0.0 is required for privileged ports.
+portForwards:
+  - guestPort: 80
+    hostPort: 80
+    hostIP: "0.0.0.0"
+  - guestPort: 443
+    hostPort: 443
+    hostIP: "0.0.0.0"

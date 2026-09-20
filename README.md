@@ -19,6 +19,11 @@ installs, each with its own code tree so they can run different versions.
 - `tar`, `systemctl`
 - `nginx` unless `-SkipNginx`
 
+**Ubuntu only.** macOS is not supported. Test on Ubuntu — a Lima VM, another
+Linux VM, or the VPS — using `NVK_ROOT` if you are editing this repo. See
+[docs/DECISION-macos.md](docs/DECISION-macos.md) and the beginner walkthrough
+[docs/LOCAL-TESTING.md](docs/LOCAL-TESTING.md).
+
 Optional: `sudo snap refresh --hold powershell` after a known-good revision.
 
 ## Install the kit
@@ -199,7 +204,26 @@ Updates never rewrite `env` except refreshing the `_SEED` path to the new tree.
 
 ## Local development of the kit
 
-Install a checkout onto the VPS (does not fetch GitHub):
+Do this on **Ubuntu** (the VPS or a VM). The host you edit on can be a Mac;
+the kit still has to run on Ubuntu.
+
+### Lima on a Mac
+
+Step-by-step (cloud images, cloud-init, SSH, port forwards, mkcert vs
+certbot): [docs/LOCAL-TESTING.md](docs/LOCAL-TESTING.md).
+
+Short version: download the Ubuntu **26.04** cloud `.img` (not the live-server
+ISO), then:
+
+```bash
+# default path: ~/Downloads/ubuntu-26.04-server-cloudimg-arm64.img  (Apple Silicon)
+./scripts/lima-up.sh
+limactl shell nvk
+```
+
+### NVK_ROOT
+
+Install a checkout onto Ubuntu (does not fetch GitHub):
 
 ```bash
 sudo NVK_ROOT=/path/to/node-vps-kit \

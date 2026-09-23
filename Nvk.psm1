@@ -217,6 +217,14 @@ function Install-NvkKitAndWrappers {
     $lib = $script:NvkKitLibDir
     Assert-NvkRoot
     Write-NvkInfo "installing kit to $lib"
+
+    # Collect before replacing apps/ so prior per-app wrappers can be removed.
+    $staleAppIds = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    if (Test-Path -LiteralPath (Join-Path $lib 'apps')) {
+        foreach ($id in @(Get-NvkFamilyAppIds -KitRoot $lib)) { [void]$staleAppIds.Add($id) }
+    }
+    foreach ($id in @(Get-NvkFamilyAppIds -KitRoot $Source)) { [void]$staleAppIds.Add($id) }
+
     New-Item -ItemType Directory -Path $lib -Force | Out-Null
     if (-not (Test-NvkIsInstalledKitRoot $Source)) {
         foreach ($name in @('bootstrap.ps1', 'install.ps1', 'update.ps1', 'startup.ps1', 'Nvk.psm1', 'README.md')) {
@@ -250,23 +258,28 @@ function Install-NvkKitAndWrappers {
     }
 
     New-Item -ItemType Directory -Path $script:NvkSbinDir -Force | Out-Null
-    $ids = @(Get-NvkFamilyAppIds -KitRoot $Source)
-    foreach ($id in $ids) {
-        $installWrap = Join-Path $script:NvkSbinDir "$id-install"
-        $updateWrap = Join-Path $script:NvkSbinDir "$id-update"
-        Write-NvkFile $installWrap (New-NvkWrapperScript -Target "$lib/install.ps1" -Passthrough "-App '$id'")
-        Write-NvkFile $updateWrap (New-NvkWrapperScript -Target "$lib/update.ps1" -Passthrough "-App '$id'")
-        Invoke-NvkNative -Command @('chmod', '755', $installWrap) | Out-Null
-        Invoke-NvkNative -Command @('chmod', '755', $updateWrap) | Out-Null
+    foreach ($id in $staleAppIds) {
+        foreach ($suffix in @('install', 'update')) {
+            $path = Join-Path $script:NvkSbinDir "$id-$suffix"
+            if (Test-Path -LiteralPath $path) {
+                Remove-Item -LiteralPath $path -Force
+            }
+        }
     }
 
+    $appInstallWrap = Join-Path $script:NvkSbinDir 'nvk-app-install'
+    $appUpdateWrap = Join-Path $script:NvkSbinDir 'nvk-app-update'
     $startupWrap = Join-Path $script:NvkSbinDir 'nvk-startup'
     $kitUpdateWrap = Join-Path $script:NvkSbinDir 'nvk-update'
+    Write-NvkFile $appInstallWrap (New-NvkWrapperScript -Target "$lib/install.ps1")
+    Write-NvkFile $appUpdateWrap (New-NvkWrapperScript -Target "$lib/update.ps1")
     Write-NvkFile $startupWrap (New-NvkWrapperScript -Target "$lib/startup.ps1")
     Write-NvkFile $kitUpdateWrap (New-NvkWrapperScript -Target "$lib/bootstrap.ps1")
-    Invoke-NvkNative -Command @('chmod', '755', $startupWrap) | Out-Null
-    Invoke-NvkNative -Command @('chmod', '755', $kitUpdateWrap) | Out-Null
+    foreach ($wrap in @($appInstallWrap, $appUpdateWrap, $startupWrap, $kitUpdateWrap)) {
+        Invoke-NvkNative -Command @('chmod', '755', $wrap) | Out-Null
+    }
 
+    $ids = @(Get-NvkFamilyAppIds -KitRoot $Source)
     $appList = if ($ids.Count) { $ids -join ', ' } else { '(none)' }
     Write-NvkInfo "installed wrappers in $($script:NvkSbinDir)"
     Write-NvkInfo "registered apps: $appList"
@@ -1368,7 +1381,7 @@ function Resolve-NvkInstanceNameParam {
         }
         if ($taken.Contains($picked)) {
             if (-not (Test-NvkInteractive)) {
-                Write-NvkError "instance '$picked' already exists (use $AppId-update to upgrade)"
+                Write-NvkError "instance '$picked' already exists (use nvk-app-update -App $AppId -Name $picked)"
             }
             Write-Host "$($script:NvkCmd): instance '$picked' already exists" -ForegroundColor Yellow
             continue
@@ -1612,7 +1625,7 @@ function Install-NvkAppInstance {
     $service = Get-NvkServiceName $app.AppId $Name
 
     if ((Test-Path -LiteralPath (Join-Path $instance 'current')) -and (Test-Path -LiteralPath $envFile)) {
-        Write-NvkError "instance '$Name' already exists at $instance (use $($app.AppId)-update to upgrade)"
+        Write-NvkError "instance '$Name' already exists at $instance (use nvk-app-update -App $($app.AppId) -Name $Name)"
     }
 
     $tag = Resolve-NvkReleaseTag -Repo $app.Repo -AppId $app.AppId -Version $Version
@@ -1676,7 +1689,7 @@ Next:
   - Point DNS for this host at this VPS (A / AAAA).
   - Open ports 80 and 443 on the firewall.
   - After DNS works: sudo certbot --nginx -d $hostHint
-  - Later upgrades: sudo $($app.AppId)-update -Name $Name
+  - Later upgrades: sudo nvk-app-update -App $($app.AppId) -Name $Name
 
 "@
     if ($app.PostInstallNote) {

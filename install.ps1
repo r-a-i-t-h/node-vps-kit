@@ -9,10 +9,10 @@ Uses the kit already on this box (see bootstrap.ps1 / nvk-update). Downloads a
 GitHub Release and writes systemd and nginx for one named instance.
 
 .EXAMPLE
-sudo proseden-install -Name www -ServerName www.proseden.co.uk -Port 3336
+sudo nvk-app-install -App proseden -Name www -ServerName www.proseden.co.uk -Port 3336
 
 .EXAMPLE
-sudo proseden-install
+sudo nvk-app-install
 # On a terminal, missing flags are chosen from a numbered menu.
 #>
 [CmdletBinding()]
@@ -54,7 +54,7 @@ if (-not $moduleRoot) {
 install: kit not found. Install the kit first, then install the app:
 
   curl -fsSL https://raw.githubusercontent.com/$repo/$ref/bootstrap.ps1 | sudo pwsh -File -
-  sudo $App-install -Name $Name ...
+  sudo nvk-app-install -App $App -Name $Name ...
 "@
 }
 

@@ -47,7 +47,7 @@ That writes `/usr/local/lib/node-vps-kit` and PATH wrappers:
 
 - `/usr/local/sbin/nvk-update` — refresh this kit (and app profiles)
 - `/usr/local/sbin/nvk-startup`
-- `/usr/local/sbin/<app>-install` / `<app>-update` for each profile in `apps/`
+- `/usr/local/sbin/nvk-app-install` / `nvk-app-update` — install or update an app instance
 
 Wrappers use `#!/snap/bin/pwsh`.
 
@@ -56,14 +56,14 @@ Wrappers use `#!/snap/bin/pwsh`.
 The kit must already be on the box.
 
 ```bash
-sudo proseden-install -Name www -ServerName www.proseden.co.uk -Port 3336
+sudo nvk-app-install -App proseden -Name www -ServerName www.proseden.co.uk -Port 3336
 ```
 
-Omit flags on a terminal and the command offers a numbered menu (`1` / `a` select the first item). You can also type a value. Non-interactive runs still need the flags.
+Omit flags on a terminal and the command offers a numbered menu (`1` / `a` select the first item), including which app when `-App` is omitted. You can also type a value. Non-interactive runs still need the flags.
 
 That command:
 
-1. Loads `apps/proseden.psd1` from the local kit.
+1. Loads `apps/<id>.psd1` from the local kit (after `-App` or the menu).
 2. Downloads the app’s GitHub Release (`.tar.gz` or `.zip`), with a shared cache of the last 3 fetched tags per app under `/var/cache/node-vps-kit/`.
 3. Unpacks under `/opt/<app>/<name>/releases/<tag>` and points `current` at it.
 4. Creates empty `data/` (the app may seed on first boot), writes `env`, systemd unit, nginx.
@@ -83,11 +83,11 @@ Multiple instances: different `-Name`, `-Port`, and hostname or base path. Each 
 ## Update one instance
 
 ```bash
-sudo proseden-update -Name test
-sudo proseden-update -Name www -Version v0.2.0
+sudo nvk-app-update -App proseden -Name test
+sudo nvk-app-update -App proseden -Name www -Version v0.2.0
 ```
 
-On a terminal, `sudo proseden-update` with no `-Name` lists installed instances.
+On a terminal, `sudo nvk-app-update` with no `-App` / `-Name` lists apps and installed instances.
 
 The updater backs up `data/` to a zip, swaps the app tree, runs optional
 `deploy/post-update.sh` from the release (as the app user), and restarts systemd.
@@ -143,8 +143,8 @@ nginx stay. `-Add` writes the unit from the template again and `enable --now`.
 /usr/local/lib/node-vps-kit/   # this kit (one copy)
 /usr/local/sbin/nvk-update
 /usr/local/sbin/nvk-startup
-/usr/local/sbin/<app>-install
-/usr/local/sbin/<app>-update
+/usr/local/sbin/nvk-app-install
+/usr/local/sbin/nvk-app-update
 
 /var/cache/node-vps-kit/<app>/<tag>/   # last 3 downloaded archives per app
 ```

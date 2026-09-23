@@ -383,7 +383,7 @@ sudo NVK_ROOT=/Users/raith/dev/cursor/node-vps-kit \
     -App proseden -Name www
 ```
 
-If you already bootstrapped, the PATH wrappers (`proseden-install`,
+If you already bootstrapped, the PATH wrappers (`nvk-app-install`,
 `nvk-update`, …) live in `/usr/local/sbin` **inside the guest**. Those
 wrappers always invoke the **installed** copy under
 `/usr/local/lib/node-vps-kit`, not your git tree. While you are changing kit
@@ -467,7 +467,7 @@ inside Ubuntu can point at those files (adjust the user path):
 `/Users/raith/Downloads/www.example.test.pem`
 `/Users/raith/Downloads/www.example.test-key.pem`
 
-The kit’s site file is HTTP-only (`listen 80`). After `proseden-install`,
+The kit’s site file is HTTP-only (`listen 80`). After `nvk-app-install`,
 edit the guest site (for example
 `/etc/nginx/sites-available/proseden-www`) and add a `listen 443 ssl`
 server (or a second `server { }` with the same `server_name`) using those

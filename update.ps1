@@ -10,12 +10,12 @@ systemd. Does not rewrite instance data (except the seed path). Does not update
 this kit — run nvk-update for that.
 
 .EXAMPLE
-sudo proseden-update -Name test
-sudo proseden-update -Name www -Version v0.2.0
+sudo nvk-app-update -App proseden -Name test
+sudo nvk-app-update -App proseden -Name www -Version v0.2.0
 
 .EXAMPLE
-sudo proseden-update
-# On a terminal, missing -Name is chosen from installed instances.
+sudo nvk-app-update
+# On a terminal, missing -App / -Name are chosen from menus.
 #>
 [CmdletBinding()]
 param(

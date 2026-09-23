@@ -6,10 +6,11 @@ Install or update node-vps-kit on this Ubuntu VPS.
 
 .DESCRIPTION
 Fetches this kit from GitHub into /usr/local/lib/node-vps-kit and writes PATH
-wrappers (nvk-update, nvk-startup, <app>-install, <app>-update). App profiles
-under apps/ are included, so a kit update is how new apps appear on the box.
+wrappers (nvk-update, nvk-startup, nvk-app-install, nvk-app-update). App
+profiles under apps/ are included, so a kit update is how new apps appear on
+the box.
 
-Does not install an app instance. After this, run <app>-install.
+Does not install an app instance. After this, run nvk-app-install.
 
 .EXAMPLE
 curl -fsSL https://raw.githubusercontent.com/r-a-i-t-h/node-vps-kit/main/bootstrap.ps1 |

@@ -1641,7 +1641,7 @@ function Install-NvkAppInstance {
         New-Item -ItemType Directory -Path $releases, $data -Force | Out-Null
         $relDir = Join-Path $releases $tag
         if (Test-Path -LiteralPath $relDir) { Remove-Item -LiteralPath $relDir -Recurse -Force }
-        Move-Item -LiteralPath $unpacked -Destination $relDir
+        Invoke-NvkNative -Command @('mv', $unpacked, $relDir) | Out-Null
         Repair-NvkUnixExecuteBits $relDir
         Set-NvkCurrentSymlink $relDir (Join-Path $instance 'current')
     }
@@ -1767,7 +1767,7 @@ function Update-NvkAppInstance {
         New-Item -ItemType Directory -Path $releases -Force | Out-Null
         $relDir = Join-Path $releases $tag
         if (Test-Path -LiteralPath $relDir) { Remove-Item -LiteralPath $relDir -Recurse -Force }
-        Move-Item -LiteralPath $unpacked -Destination $relDir
+        Invoke-NvkNative -Command @('mv', $unpacked, $relDir) | Out-Null
         Repair-NvkUnixExecuteBits $relDir
         Update-NvkEnvSeed -App $app -EnvFile $envFile -Instance $instance
         Set-NvkCurrentSymlink $relDir $current

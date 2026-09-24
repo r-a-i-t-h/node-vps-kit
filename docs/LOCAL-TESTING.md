@@ -431,13 +431,24 @@ fails. DNS-01 (a TXT record on a real domain) can work in clever setups, but
 it is extra accounts, APIs, and failure modes, and it still does not match
 “toy hostname in `/etc/hosts`.”
 
-**mkcert** is a **local** CA for development. You run `mkcert -install` once
-on the Mac; it puts a small private CA into the Mac trust store (and Firefox
-if you install the `nss` extra). Then `mkcert www.example.test` mints a
-certificate **that this Mac already trusts**. No internet proof, no public
-DNS. Browsers on **this** Mac accept `https://www.example.test/` without a
-warning. Other people’s laptops do not, which is what you want for a
-throwaway VM.
+**mkcert** is a **local** CA for development. You run it on the **Mac**, in
+two different steps:
+
+1. `mkcert -install` **once per Mac**. That creates one private CA and puts
+   it in the Mac trust store (and Firefox, if you install the `nss` extra).
+   Every certificate you mint later is signed by that same CA, so the browser
+   already trusts them. A new test hostname does not need another
+   `-install`, and the Lima guest does not need its own CA.
+2. `mkcert` **once per parent name** when every test install lives under
+   that name. `mkcert "*.example.test" example.test` covers
+   `www.example.test`, `api.example.test`, and the bare `example.test`.
+   A later install on `other.example.test` needs a `/etc/hosts` line and an
+   nginx `server_name`. It does not need a new certificate. A different
+   parent, such as `other.test`, does.
+
+No internet proof, no public DNS. Browsers on **this** Mac accept
+`https://www.example.test/` without a warning. Other people’s laptops do
+not, which is what you want for a throwaway VM.
 
 The Node process can stay on `http://127.0.0.1:3336` inside the guest, same
 as on the VPS. **nginx terminates TLS** (port 443) and proxies to Node. That
@@ -451,35 +462,128 @@ profile) only send those cookies on HTTPS. HTTP to `:80` will look like
 
 ### mkcert on the Mac, nginx in the guest
 
-On the **Mac**:
+mkcert runs on the **Mac**. The browser that has to trust the certificate is
+the Mac browser. The Ubuntu guest only has to serve the certificate files.
+Leave mkcert uninstalled in the guest. Safari and Chrome trust the CA in
+the Mac trust store, which a CA installed inside the VM never updates.
+
+**Once per Mac** (the CA):
 
 ```bash
 brew install mkcert nss
 mkcert -install
-cd ~/Downloads
-mkcert www.example.test
 ```
 
-That writes `www.example.test.pem` and `www.example.test-key.pem` in the
-current directory. Because the guest can **read** your home directory, nginx
-inside Ubuntu can point at those files (adjust the user path):
+**Once per parent domain** (the certificate). On the Mac:
 
-`/Users/raith/Downloads/www.example.test.pem`
-`/Users/raith/Downloads/www.example.test-key.pem`
+```bash
+cd ~/Downloads
+mkcert "*.example.test" example.test
+```
 
-The kit’s site file is HTTP-only (`listen 80`). After `nvk-app-install`,
-edit the guest site (for example
-`/etc/nginx/sites-available/proseden-www`) and add a `listen 443 ssl`
-server (or a second `server { }` with the same `server_name`) using those
-certificate paths. Then:
+`*.example.test` covers single-label names such as `www.example.test` and
+`api.example.test`. The extra `example.test` argument covers the bare name,
+which a wildcard does not. It does not cover `other.test`, and it does not
+cover a name with an extra dot such as `a.b.example.test`. mkcert names the
+files from the first argument, with `*` written as `_wildcard` and `+N` for
+each extra name:
+
+`_wildcard.example.test+1.pem`
+`_wildcard.example.test+1-key.pem`
+
+Do not run `mkcert -install` again for another host under `example.test`.
+
+Copy the files onto the **guest disk**. nginx runs as `www-data`, and the
+key mkcert writes is mode `0600` in your Mac home directory, so the worker
+cannot read it straight off the home mount. In the guest (`limactl shell
+nvk`):
+
+```bash
+sudo mkdir -p /etc/nginx/ssl
+sudo cp /Users/raith/Downloads/_wildcard.example.test+1.pem /etc/nginx/ssl/
+sudo cp /Users/raith/Downloads/_wildcard.example.test+1-key.pem /etc/nginx/ssl/
+sudo chown root:www-data /etc/nginx/ssl/_wildcard.example.test+1-key.pem
+sudo chmod 640 /etc/nginx/ssl/_wildcard.example.test+1-key.pem
+```
+
+**Once in nginx** (every SSL server inherits it). Ubuntu includes
+`/etc/nginx/conf.d/*.conf` from inside `http { }`, which is outside every
+`server`. Create `/etc/nginx/conf.d/local-tls.conf` with only these two
+lines — no `server` block:
+
+```nginx
+ssl_certificate     /etc/nginx/ssl/_wildcard.example.test+1.pem;
+ssl_certificate_key /etc/nginx/ssl/_wildcard.example.test+1-key.pem;
+```
+
+A `server` that needs some other certificate can set its own pair. Those
+lines replace the inherited ones for that server only.
+
+**Each app** still needs to accept TLS. The kit’s site file only has
+`listen 80`. The shared certificate does not add a listener. After install,
+edit that site (for example `/etc/nginx/sites-available/proseden-www`) and
+add the two `listen 443 ssl` lines to the existing `server`. Leave the
+certificate lines out; this block inherits `local-tls.conf`.
+
+```nginx
+server {
+    listen 80;
+    listen [::]:80;
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    server_name www.example.test;
+
+    location / {
+        proxy_pass http://127.0.0.1:3336;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_read_timeout 60s;
+    }
+}
+```
+
+A second install on the same parent is the same shape with a different
+`server_name` and `proxy_pass` port. It does not get its own
+`ssl_certificate` lines:
+
+```nginx
+server {
+    listen 80;
+    listen [::]:80;
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    server_name api.example.test;
+
+    location / {
+        proxy_pass http://127.0.0.1:3337;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_read_timeout 60s;
+    }
+}
+```
+
+Then, still in the guest:
 
 ```bash
 sudo nginx -t
 sudo systemctl reload nginx
 ```
 
-On the Mac, keep `/etc/hosts` pointing `www.example.test` at `127.0.0.1`
-(or the vzNAT address). Open `https://www.example.test/` in the browser.
+On the Mac, `/etc/hosts` has no wildcards. Add a line for each name you
+browse, all aimed at `127.0.0.1` (or the vzNAT address):
+
+```text
+127.0.0.1 example.test www.example.test api.example.test
+```
+
+Open `https://www.example.test/`. Another host under `example.test` is a
+new hosts line plus `listen 443 ssl` on that site. The certificate file and
+`local-tls.conf` stay as they are.
 
 A **self-signed** certificate you generate with `openssl` also encrypts the
 pipe, but the Mac browser will warn on every visit unless you trust it by
@@ -535,14 +639,18 @@ sudo NVK_ROOT=/Users/raith/dev/cursor/node-vps-kit \
     -App proseden -Name www
 ```
 
-**Mac — TLS for secure cookies**
+**Mac — TLS (CA once; one wildcard for `*.example.test`)**
 
 ```bash
 brew install mkcert nss
 mkcert -install
-mkcert www.example.test
-sudo nano /etc/hosts   # 127.0.0.1 www.example.test
+cd ~/Downloads
+mkcert "*.example.test" example.test
+sudo nano /etc/hosts   # 127.0.0.1 example.test www.example.test api.example.test
 ```
 
-Then add `listen 443 ssl` in the **guest** nginx site and `systemctl reload
-nginx`.
+Then, in the **guest**, copy the pem files to `/etc/nginx/ssl/`, write
+`/etc/nginx/conf.d/local-tls.conf` with the two `ssl_certificate` lines, add
+`listen 443 ssl` to each site (no certificate lines there), and
+`systemctl reload nginx`. A new `*.example.test` host is a hosts line and
+`listen 443 ssl` only.

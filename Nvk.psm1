@@ -1,4 +1,4 @@
-# Shared helpers for node-vps-kit. Used by bootstrap.ps1, install.ps1, update.ps1, startup.ps1, service.ps1.
+# Shared helpers for node-vps-kit. Used by bootstrap.ps1, install.ps1, uninstall.ps1, update.ps1, startup.ps1, service.ps1.
 
 Set-StrictMode -Version Latest
 
@@ -51,6 +51,8 @@ function Invoke-NvkNative {
         # Drop stdout. Exit-code checks must not see it: PowerShell's -eq/-ne
         # filter arrays, so a printed line plus exit 0 is treated as failure.
         [switch]$Quiet,
+        # Drop stderr as well (best-effort systemctl when the unit may be gone).
+        [switch]$DiscardError,
         [Parameter(Mandatory)]
         [string[]]$Command
     )
@@ -65,7 +67,15 @@ function Invoke-NvkNative {
     $prev = $PSNativeCommandUseErrorActionPreference
     try {
         $global:PSNativeCommandUseErrorActionPreference = $false
-        if ($Quiet) {
+        if ($DiscardError) {
+            if ($Quiet) {
+                & $exe @rest 2>$null | Out-Null
+            }
+            else {
+                & $exe @rest 2>$null | Out-Host
+            }
+        }
+        elseif ($Quiet) {
             & $exe @rest | Out-Null
         }
         else {
@@ -235,7 +245,7 @@ function Install-NvkKitAndWrappers {
 
     New-Item -ItemType Directory -Path $lib -Force | Out-Null
     if (-not (Test-NvkIsInstalledKitRoot $Source)) {
-        foreach ($name in @('bootstrap.ps1', 'install.ps1', 'update.ps1', 'startup.ps1', 'service.ps1', 'Nvk.psm1', 'README.md')) {
+        foreach ($name in @('bootstrap.ps1', 'install.ps1', 'uninstall.ps1', 'update.ps1', 'startup.ps1', 'service.ps1', 'Nvk.psm1', 'README.md')) {
             $src = Join-Path $Source $name
             if (Test-Path -LiteralPath $src) {
                 Copy-Item -LiteralPath $src -Destination (Join-Path $lib $name) -Force
@@ -257,7 +267,7 @@ function Install-NvkKitAndWrappers {
                 Remove-Item -LiteralPath $path -Recurse -Force
             }
         }
-        foreach ($entry in @('bootstrap.ps1', 'install.ps1', 'update.ps1', 'startup.ps1', 'service.ps1')) {
+        foreach ($entry in @('bootstrap.ps1', 'install.ps1', 'uninstall.ps1', 'update.ps1', 'startup.ps1', 'service.ps1')) {
             $p = Join-Path $lib $entry
             if (Test-Path -LiteralPath $p) {
                 Invoke-NvkNative -Command @('chmod', '755', $p) | Out-Null
@@ -276,16 +286,18 @@ function Install-NvkKitAndWrappers {
     }
 
     $appInstallWrap = Join-Path $script:NvkSbinDir 'nvk-app-install'
+    $appUninstallWrap = Join-Path $script:NvkSbinDir 'nvk-app-uninstall'
     $appUpdateWrap = Join-Path $script:NvkSbinDir 'nvk-app-update'
     $startupWrap = Join-Path $script:NvkSbinDir 'nvk-startup'
     $serviceWrap = Join-Path $script:NvkSbinDir 'nvk-service'
     $kitUpdateWrap = Join-Path $script:NvkSbinDir 'nvk-update'
     Write-NvkFile $appInstallWrap (New-NvkWrapperScript -Target "$lib/install.ps1")
+    Write-NvkFile $appUninstallWrap (New-NvkWrapperScript -Target "$lib/uninstall.ps1")
     Write-NvkFile $appUpdateWrap (New-NvkWrapperScript -Target "$lib/update.ps1")
     Write-NvkFile $startupWrap (New-NvkWrapperScript -Target "$lib/startup.ps1")
     Write-NvkFile $serviceWrap (New-NvkWrapperScript -Target "$lib/service.ps1")
     Write-NvkFile $kitUpdateWrap (New-NvkWrapperScript -Target "$lib/bootstrap.ps1")
-    foreach ($wrap in @($appInstallWrap, $appUpdateWrap, $startupWrap, $serviceWrap, $kitUpdateWrap)) {
+    foreach ($wrap in @($appInstallWrap, $appUninstallWrap, $appUpdateWrap, $startupWrap, $serviceWrap, $kitUpdateWrap)) {
         Invoke-NvkNative -Command @('chmod', '755', $wrap) | Out-Null
     }
 
@@ -954,6 +966,24 @@ function Test-NvkSystemdActive {
     param([Parameter(Mandatory)][string]$Unit)
     $code = Invoke-NvkNative -AllowFailure -Command @('systemctl', 'is-active', '--quiet', $Unit)
     $code -eq 0
+}
+
+function Get-NvkSystemdActiveState {
+    param([Parameter(Mandatory)][string]$Unit)
+    if (-not (Test-NvkCommandExists 'systemctl')) { return $null }
+    $prev = $PSNativeCommandUseErrorActionPreference
+    try {
+        $global:PSNativeCommandUseErrorActionPreference = $false
+        $raw = @(& systemctl show -p ActiveState --value $Unit 2>$null) | Select-Object -First 1
+        if ($LASTEXITCODE -ne 0 -or -not $raw) { return $null }
+        $state = ([string]$raw).Trim()
+        if ($state -like 'ActiveState=*') { $state = $state.Substring('ActiveState='.Length).Trim() }
+        if (-not $state) { return $null }
+        $state
+    }
+    finally {
+        $global:PSNativeCommandUseErrorActionPreference = $prev
+    }
 }
 
 function Test-NvkSystemdEnabled {
@@ -1743,6 +1773,7 @@ Next:
   - Open ports 80 and 443 on the firewall.
   - After DNS works: sudo certbot --nginx -d $hostHint
   - Later upgrades: sudo nvk-app-update -App $($app.AppId) -Name $Name
+  - Remove it: sudo nvk-app-uninstall -App $($app.AppId) -Name $Name
 
 "@
     if ($app.PostInstallNote) {
@@ -1837,6 +1868,477 @@ function Update-NvkAppInstance {
     Remove-NvkOldReleases -Releases $releases -Keep @($tag, $prev)
     Write-NvkInfo "updated $Name to $tag (data untouched: $data)"
     Write-NvkInfo "status: systemctl status $service"
+}
+
+function Test-NvkFileOrLink {
+    param([Parameter(Mandatory)][string]$Path)
+    if (Test-Path -LiteralPath $Path) { return $true }
+    $parent = Split-Path -Parent $Path
+    $leaf = Split-Path -Leaf $Path
+    if (-not $parent -or -not (Test-Path -LiteralPath $parent)) { return $false }
+    foreach ($item in @(Get-ChildItem -LiteralPath $parent -Force -ErrorAction SilentlyContinue)) {
+        if ($item.Name -eq $leaf) { return $true }
+    }
+    $false
+}
+
+function Test-NvkNginxSnippetIncludeLine {
+    param(
+        [Parameter(Mandatory)][string]$Line,
+        [Parameter(Mandatory)][string]$SnippetName
+    )
+    $pattern = '^\s*include\s+["'']?(?:\S*/)?snippets/' + [regex]::Escape($SnippetName) + '["'']?\s*;\s*(?:#.*)?$'
+    [bool]($Line -match $pattern)
+}
+
+function Get-NvkInstanceDirFromUnit {
+    param(
+        [Parameter(Mandatory)][string]$UnitPath,
+        [Parameter(Mandatory)][string]$Name
+    )
+    if (-not (Test-Path -LiteralPath $UnitPath)) { return $null }
+    $envDir = $null
+    $workDir = $null
+    foreach ($line in @(Get-Content -LiteralPath $UnitPath)) {
+        if ($line -like 'EnvironmentFile=*') {
+            $value = $line.Substring('EnvironmentFile='.Length).Trim().Trim('"').Trim("'")
+            if ($value.StartsWith('-')) { $value = $value.Substring(1).Trim() }
+            if ($value) {
+                $parent = Split-Path -Parent $value
+                if ($parent) { $envDir = $parent }
+            }
+        }
+        elseif ($line -like 'WorkingDirectory=*') {
+            $value = $line.Substring('WorkingDirectory='.Length).Trim().Trim('"').Trim("'")
+            $suffix = "/$Name/current"
+            if ($value.EndsWith($suffix)) {
+                $workDir = $value.Substring(0, $value.Length - '/current'.Length)
+            }
+        }
+    }
+    if ($envDir) { return $envDir }
+    $workDir
+}
+
+function ConvertTo-NvkLexicalPath {
+    param([Parameter(Mandatory)][string]$Path)
+    $rooted = $Path.StartsWith('/') -or $Path.StartsWith('\')
+    $parts = [System.Collections.Generic.List[string]]::new()
+    foreach ($part in ($Path.Replace('\', '/') -split '/')) {
+        if ($part -eq '' -or $part -eq '.') { continue }
+        if ($part -eq '..') {
+            if ($parts.Count -gt 0) { $parts.RemoveAt($parts.Count - 1) }
+            continue
+        }
+        $parts.Add($part)
+    }
+    if (-not $rooted) {
+        return ($parts -join '/')
+    }
+    if ($parts.Count -eq 0) { return '/' }
+    '/' + ($parts -join '/')
+}
+
+function Assert-NvkDeletableInstanceDir {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Name
+    )
+    $leaf = [System.IO.Path]::GetFileName($Path)
+    if ($leaf -ne $Name) {
+        Write-NvkError "refusing to delete '$Path' (directory name is not '$Name')"
+    }
+    $parent = Split-Path -Parent $Path
+    if ([string]::IsNullOrWhiteSpace($parent) -or $parent -eq $Path) {
+        Write-NvkError "refusing to delete '$Path'"
+    }
+    $parent = $parent.TrimEnd('/', '\')
+    $blocked = @(
+        '/', '/opt', '/etc', '/usr', '/usr/local', '/var', '/home', '/root',
+        '/bin', '/sbin', '/lib', '/lib64', '/boot', '/dev', '/proc', '/sys', '/run', '/tmp',
+        '/private/tmp', '/private/var', '/private/etc'
+    )
+    foreach ($b in $blocked) {
+        if ($Path -eq $b -or $parent -eq $b) {
+            Write-NvkError "refusing to delete '$Path'"
+        }
+    }
+}
+
+function Resolve-NvkDeletableInstanceDir {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Name
+    )
+    if (-not [System.IO.Path]::IsPathRooted($Path)) {
+        Write-NvkError "refusing to delete relative path '$Path'"
+    }
+    $lexical = ConvertTo-NvkLexicalPath $Path
+    Assert-NvkDeletableInstanceDir -Path $lexical -Name $Name
+    if (-not (Test-Path -LiteralPath $lexical)) {
+        return $lexical
+    }
+    $item = Get-Item -LiteralPath $lexical -Force
+    if ($item.LinkType) {
+        Write-NvkError "refusing to delete '$lexical' (it is a symlink)"
+    }
+    $resolved = ConvertTo-NvkLexicalPath ((Resolve-Path -LiteralPath $lexical).Path)
+    Assert-NvkDeletableInstanceDir -Path $resolved -Name $Name
+    $resolved
+}
+
+function Resolve-NvkUninstallInstanceDir {
+    param(
+        [Parameter(Mandatory)]$App,
+        [Parameter(Mandatory)][string]$Name,
+        [string]$Prefix
+    )
+    $raw = $null
+    if ($Prefix) {
+        $raw = Join-Path $Prefix $Name
+    }
+    else {
+        $fromUnit = Get-NvkInstanceDirFromUnit -UnitPath (Get-NvkUnitPath $App.AppId $Name) -Name $Name
+        if ($fromUnit) {
+            $raw = $fromUnit
+        }
+        else {
+            $raw = Join-Path $App.Prefix $Name
+        }
+    }
+    Resolve-NvkDeletableInstanceDir -Path $raw -Name $Name
+}
+
+function Get-NvkPathsOutsideInstance {
+    param(
+        [Parameter(Mandatory)]$App,
+        [Parameter(Mandatory)][string]$InstanceDir
+    )
+    $found = [System.Collections.Generic.List[string]]::new()
+    $envFile = Join-Path $InstanceDir 'env'
+    if (-not (Test-Path -LiteralPath $envFile)) {
+        return ,$found
+    }
+    $root = [System.IO.Path]::GetFullPath($InstanceDir).TrimEnd('/', '\')
+    $seen = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($key in @("$($App.EnvPrefix)_DATA", "$($App.EnvPrefix)_BACKUP")) {
+        $value = Get-NvkEnvValue $envFile $key
+        if (-not $value) { continue }
+        if (-not [System.IO.Path]::IsPathRooted($value)) { continue }
+        $full = [System.IO.Path]::GetFullPath($value).TrimEnd('/', '\')
+        $inside = ($full -eq $root) -or $full.StartsWith($root + '/') -or $full.StartsWith($root + '\')
+        if ($inside) { continue }
+        $shown = ConvertTo-NvkLexicalPath $value
+        if ($seen.Add($shown)) { $found.Add($shown) }
+    }
+    ,$found
+}
+
+function Get-NvkNginxManagedPaths {
+    param(
+        [Parameter(Mandatory)][string]$AppId,
+        [Parameter(Mandatory)][string]$Name
+    )
+    $stem = "$AppId-$Name"
+    @(
+        "/etc/nginx/sites-enabled/$stem"
+        "/etc/nginx/sites-available/$stem"
+        "/etc/nginx/conf.d/$stem.conf"
+        "/etc/nginx/snippets/$stem.conf"
+    )
+}
+
+function Get-NvkInstanceNginxPlan {
+    param(
+        [Parameter(Mandatory)][string]$AppId,
+        [Parameter(Mandatory)][string]$Name
+    )
+    $stem = "$AppId-$Name"
+    $snippetName = "$stem.conf"
+    $managed = @(Get-NvkNginxManagedPaths -AppId $AppId -Name $Name)
+    $files = [System.Collections.Generic.List[string]]::new()
+    $skip = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($path in $managed) {
+        [void]$skip.Add($path)
+        if (Test-NvkFileOrLink $path) {
+            $files.Add($path)
+            if (Test-Path -LiteralPath $path) {
+                try { [void]$skip.Add((Resolve-Path -LiteralPath $path).Path) } catch { }
+            }
+        }
+    }
+
+    $candidates = [System.Collections.Generic.List[string]]::new()
+    foreach ($site in @(Get-NvkNginxSiteFiles)) { $candidates.Add($site) }
+    $nginxConf = '/etc/nginx/nginx.conf'
+    if (Test-Path -LiteralPath $nginxConf) { $candidates.Add($nginxConf) }
+
+    $includeFiles = [System.Collections.Generic.List[string]]::new()
+    $seen = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($site in $candidates) {
+        if ($skip.Contains($site)) { continue }
+        $key = $site
+        if (Test-Path -LiteralPath $site) {
+            try { $key = (Resolve-Path -LiteralPath $site).Path } catch { $key = $site }
+        }
+        if ($skip.Contains($key)) { continue }
+        if (-not $seen.Add($key)) { continue }
+        if (-not (Test-Path -LiteralPath $site)) { continue }
+        $hit = $false
+        foreach ($line in @(Get-Content -LiteralPath $site)) {
+            if (Test-NvkNginxSnippetIncludeLine -Line $line -SnippetName $snippetName) {
+                $hit = $true
+                break
+            }
+        }
+        if ($hit) { $includeFiles.Add($site) }
+    }
+
+    [pscustomobject]@{
+        Files        = $files
+        IncludeFiles = $includeFiles
+        SnippetName  = $snippetName
+    }
+}
+
+function Remove-NvkSnippetIncludeFromFile {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$SnippetName
+    )
+    if (-not (Test-Path -LiteralPath $Path)) { return $false }
+    $kept = [System.Collections.Generic.List[string]]::new()
+    $removed = $false
+    foreach ($line in @(Get-Content -LiteralPath $Path)) {
+        if (Test-NvkNginxSnippetIncludeLine -Line $line -SnippetName $SnippetName) {
+            $removed = $true
+            continue
+        }
+        $kept.Add($line)
+    }
+    if ($removed) {
+        Write-NvkFile $Path ($kept -join "`n")
+        Write-NvkInfo "removed nginx include from $Path"
+    }
+    $removed
+}
+
+function Remove-NvkInstanceNginx {
+    param(
+        [Parameter(Mandatory)]$Plan
+    )
+    $changed = $false
+    foreach ($site in @($Plan.IncludeFiles)) {
+        if (Remove-NvkSnippetIncludeFromFile -Path $site -SnippetName $Plan.SnippetName) {
+            $changed = $true
+        }
+    }
+    foreach ($path in @($Plan.Files)) {
+        if (Test-NvkFileOrLink $path) {
+            Invoke-NvkNative -Quiet -Command @('rm', '-f', '--', $path) | Out-Null
+            Write-NvkInfo "removed $path"
+            $changed = $true
+        }
+    }
+    if (-not $changed) { return $false }
+    if (-not (Test-NvkCommandExists 'nginx')) {
+        Write-NvkInfo 'nginx command not found; skipped config test and reload'
+        return $true
+    }
+    try {
+        Test-NvkNginxConfig
+    }
+    catch {
+        Write-NvkError 'nginx config test failed; instance directory was left in place. Fix nginx, then re-run uninstall.'
+    }
+    if ((Test-NvkCommandExists 'systemctl') -and (Test-NvkSystemdActive 'nginx')) {
+        Invoke-NvkNative -Command @('systemctl', 'reload', 'nginx') | Out-Null
+        Write-NvkInfo 'nginx reloaded'
+    }
+    else {
+        Write-NvkInfo 'nginx config updated (nginx is not running)'
+    }
+    $true
+}
+
+function Assert-NvkInstanceStopped {
+    param(
+        [Parameter(Mandatory)][string]$AppId,
+        [Parameter(Mandatory)][string]$Name
+    )
+    $svc = Get-NvkServiceName $AppId $Name
+    $state = Get-NvkSystemdActiveState $svc
+    $running = @('active', 'activating', 'deactivating', 'reloading')
+    if ($running -contains $state) {
+        Write-NvkError "service $svc is $state. Stop it first: nvk-service -Stop -App $AppId -Name $Name"
+    }
+}
+
+function Remove-NvkInstanceSystemd {
+    param(
+        [Parameter(Mandatory)][string]$AppId,
+        [Parameter(Mandatory)][string]$Name
+    )
+    $svc = Get-NvkServiceName $AppId $Name
+    $unit = Get-NvkUnitPath $AppId $Name
+    $dropin = "$unit.d"
+    $wants = "/etc/systemd/system/multi-user.target.wants/$svc.service"
+    $removed = $false
+    if (Test-NvkFileOrLink $unit) {
+        Invoke-NvkNative -Quiet -Command @('rm', '-f', '--', $unit) | Out-Null
+        Write-NvkInfo "removed $unit"
+        $removed = $true
+    }
+    if (Test-Path -LiteralPath $dropin) {
+        Invoke-NvkNative -Quiet -Command @('rm', '-rf', '--', $dropin) | Out-Null
+        Write-NvkInfo "removed $dropin"
+        $removed = $true
+    }
+    if (Test-NvkFileOrLink $wants) {
+        if (Test-NvkCommandExists 'systemctl') {
+            Invoke-NvkNative -AllowFailure -Quiet -DiscardError -Command @('systemctl', 'disable', $svc) | Out-Null
+        }
+        if (Test-NvkFileOrLink $wants) {
+            Invoke-NvkNative -Quiet -Command @('rm', '-f', '--', $wants) | Out-Null
+            Write-NvkInfo "removed $wants"
+            $removed = $true
+        }
+    }
+    if ($removed -and (Test-NvkCommandExists 'systemctl')) {
+        Invoke-NvkNative -Quiet -Command @('systemctl', 'daemon-reload') | Out-Null
+        Invoke-NvkNative -AllowFailure -Quiet -DiscardError -Command @('systemctl', 'reset-failed', $svc) | Out-Null
+    }
+    $removed
+}
+
+function Confirm-NvkAppUninstall {
+    param(
+        [switch]$Yes,
+        [Parameter(Mandatory)][string]$AppId,
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][string]$InstanceDir,
+        [Parameter(Mandatory)][bool]$FolderExists,
+        [Parameter(Mandatory)][bool]$UnitExists,
+        [Parameter(Mandatory)]$NginxPlan,
+        $ExternalPaths
+    )
+    Write-Host ''
+    Write-NvkInfo "this will permanently delete the '$Name' instance of $AppId"
+    if ($FolderExists) {
+        Write-Host "  folder   $InstanceDir (code, data, backups, env)"
+    }
+    else {
+        Write-Host "  folder   $InstanceDir (already absent)"
+    }
+    if ($UnitExists) {
+        Write-Host "  systemd  $(Get-NvkUnitPath $AppId $Name)"
+    }
+    foreach ($path in @($NginxPlan.Files)) {
+        Write-Host "  nginx    $path"
+    }
+    foreach ($path in @($NginxPlan.IncludeFiles)) {
+        Write-Host "  nginx    include snippets/$($NginxPlan.SnippetName) in $path"
+    }
+    foreach ($path in @($ExternalPaths)) {
+        Write-Host "  left     $path (outside the instance folder)"
+    }
+    Write-Host ''
+    if ($Yes) { return }
+    if (-not (Test-NvkInteractive)) {
+        Write-NvkError "refusing to delete '$Name' without -Yes"
+    }
+    while ($true) {
+        $answer = $null
+        try {
+            $answer = Read-Host "$($script:NvkCmd): type '$Name' to uninstall, or press Enter to cancel"
+        }
+        catch {
+            Write-NvkError 'no input (need a terminal, or pass -Yes)'
+        }
+        if ([string]::IsNullOrWhiteSpace($answer)) {
+            Write-NvkError 'cancelled'
+        }
+        if ($answer.Trim() -eq $Name) { return }
+        Write-Host "$($script:NvkCmd): type the instance name '$Name' to confirm" -ForegroundColor Yellow
+    }
+}
+
+function Uninstall-NvkAppInstance {
+    param(
+        [Parameter(Mandatory)][string]$AppId,
+        [Parameter(Mandatory)][string]$Name,
+        [string]$Prefix,
+        [switch]$Yes
+    )
+    Assert-NvkRoot
+    Assert-NvkName $Name
+    $app = Import-NvkApp $AppId
+    if (-not (Test-NvkName $app.AppId)) {
+        Write-NvkError "app id '$($app.AppId)' is not a safe path name"
+    }
+    $instanceDir = Resolve-NvkUninstallInstanceDir -App $app -Name $Name -Prefix $Prefix
+    $unit = Get-NvkUnitPath $app.AppId $Name
+    $unitExists = Test-NvkFileOrLink $unit
+    $folderExists = Test-Path -LiteralPath $instanceDir
+    $nginxPlan = Get-NvkInstanceNginxPlan -AppId $app.AppId -Name $Name
+    $external = Get-NvkPathsOutsideInstance -App $app -InstanceDir $instanceDir
+    $nginxCount = @($nginxPlan.Files).Count + @($nginxPlan.IncludeFiles).Count
+    if (-not $folderExists -and -not $unitExists -and $nginxCount -eq 0) {
+        Write-NvkError "instance '$Name' not found at $instanceDir (no systemd unit or nginx config either)"
+    }
+
+    Assert-NvkInstanceStopped -AppId $app.AppId -Name $Name
+    Confirm-NvkAppUninstall `
+        -Yes:$Yes `
+        -AppId $app.AppId `
+        -Name $Name `
+        -InstanceDir $instanceDir `
+        -FolderExists $folderExists `
+        -UnitExists $unitExists `
+        -NginxPlan $nginxPlan `
+        -ExternalPaths $external
+
+    $service = Get-NvkServiceName $app.AppId $Name
+    # Re-check after the prompt. Uninstall never stops a service.
+    Assert-NvkInstanceStopped -AppId $app.AppId -Name $Name
+    $removedNginx = Remove-NvkInstanceNginx -Plan $nginxPlan
+
+    $removedFolder = $false
+    Assert-NvkInstanceStopped -AppId $app.AppId -Name $Name
+    if (Test-Path -LiteralPath $instanceDir) {
+        $instanceDir = Resolve-NvkDeletableInstanceDir -Path $instanceDir -Name $Name
+        Invoke-NvkNative -Command @('rm', '-rf', '--', $instanceDir) | Out-Null
+        if (Test-Path -LiteralPath $instanceDir) {
+            Write-NvkError "failed to delete $instanceDir"
+        }
+        Write-NvkInfo "removed $instanceDir"
+        $removedFolder = $true
+    }
+
+    $removedUnit = Remove-NvkInstanceSystemd -AppId $app.AppId -Name $Name
+
+    $userLeft = ''
+    $idOk = Invoke-NvkNative -AllowFailure -Quiet -DiscardError -Command @('id', $app.User)
+    if ($idOk -eq 0) { $userLeft = $app.User }
+
+    Write-Host @"
+
+Uninstalled '$Name' ($($app.AppId)).
+
+  Folder:   $(if ($removedFolder) { $instanceDir } else { '(already absent)' })
+  Service:  $(if ($removedUnit) { $service } else { '(no unit)' })
+  Nginx:    $(if ($removedNginx) { 'removed' } else { '(none found)' })
+"@
+    if ($userLeft) {
+        Write-Host "  User:     $userLeft is still on this box"
+    }
+    foreach ($path in @($external)) {
+        Write-Host "  Left:     $path"
+    }
+    if ($removedNginx) {
+        Write-Host '  TLS certificates under /etc/letsencrypt, if any, are still on this box.'
+    }
+    Write-Host ''
 }
 
 function Get-NvkStartup {

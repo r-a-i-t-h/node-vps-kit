@@ -49,6 +49,7 @@ That writes `/usr/local/lib/node-vps-kit` and PATH wrappers:
 - `/usr/local/sbin/nvk-startup` — add or remove the boot unit
 - `/usr/local/sbin/nvk-service` — start, stop, or restart the running service
 - `/usr/local/sbin/nvk-app-install` / `nvk-app-update` — install or update an app instance
+- `/usr/local/sbin/nvk-app-uninstall` — delete an app instance (nginx, systemd, and its directory)
 
 Wrappers use `#!/snap/bin/pwsh`.
 
@@ -102,6 +103,21 @@ still runs. Offline `-Version latest` uses the most recently fetched cached tag
 (and says so).
 
 App update does **not** refresh the kit.
+
+## Uninstall one instance
+
+```bash
+sudo nvk-app-uninstall -App proseden -Name www
+sudo nvk-app-uninstall -App proseden -Name www -Yes
+```
+
+On a terminal, `sudo nvk-app-uninstall` with no `-App` / `-Name` lists apps and installed instances. It then prints what it will delete and asks you to type the instance name. Non-interactive runs need `-App`, `-Name`, and `-Yes`.
+
+The service must already be stopped (`sudo nvk-service -Stop -App proseden -Name www`). Uninstall refuses while that service is running, starting, or stopping, and it does not stop the service itself.
+
+This deletes that instance's nginx site or path-mount snippet (and the `include` line in an existing site), its systemd unit, and `/opt/<app>/<name>/` — code, `data/`, `backup/`, and `env`. The system user stays. Let's Encrypt certificates under `/etc/letsencrypt` stay. Paths in `env` that point outside the instance directory are left in place and listed.
+
+The instance directory is read from the systemd unit when that unit is still installed. Pass `-Prefix` when the unit is already gone and install used a prefix other than the app profile default.
 
 ## Update the kit
 
@@ -164,6 +180,7 @@ for add or remove, then the instance (`1` / `a` selects the first item).
 
 `-Remove` drops the unit (stop, disable, delete the file). Code, data, and
 nginx stay. `-Add` writes the unit from the template again and `enable --now`.
+To delete the instance directory and nginx as well, use `nvk-app-uninstall`.
 
 ## Layout on disk
 
@@ -180,6 +197,7 @@ nginx stay. `-Add` writes the unit from the template again and `enable --now`.
 /usr/local/sbin/nvk-startup
 /usr/local/sbin/nvk-service
 /usr/local/sbin/nvk-app-install
+/usr/local/sbin/nvk-app-uninstall
 /usr/local/sbin/nvk-app-update
 
 /var/cache/node-vps-kit/<app>/<tag>/   # last 3 downloaded archives per app

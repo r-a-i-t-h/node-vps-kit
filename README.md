@@ -58,6 +58,7 @@ The kit must already be on the box.
 
 ```bash
 sudo nvk-app-install -App proseden -Name www -ServerName www.proseden.co.uk -Port 3336
+sudo nvk-app-install -App tessera -Name www -ServerName www.example.com -Port 7356
 ```
 
 Omit flags on a terminal and the command offers a numbered menu (`1` / `a` select the first item), including which app when `-App` is omitted. You can also type a value. Non-interactive runs still need the flags.
@@ -74,10 +75,12 @@ first (`sudo nvk-update`).
 
 ### Subdomain vs path mount
 
-| Mode | Flags |
-|---|---|
-| Dedicated hostname | `-ServerName HOST` (app at `/`) |
-| Path on existing site | `-NginxSite FILE -BasePath PATH` |
+| Mode | Flags | Apps |
+|---|---|---|
+| Dedicated hostname | `-ServerName HOST` (app at `/`) | every profile |
+| Path on existing site | `-NginxSite FILE -BasePath PATH` | profiles with `HasBasePath` |
+
+Tessera’s profile sets `HasBasePath` to `$false`, so it installs on a dedicated hostname. Proseden accepts either mode.
 
 Multiple instances: different `-Name`, `-Port`, and hostname or base path. Each keeps its own app copy and `data/`.
 
@@ -199,7 +202,7 @@ Add `apps/<id>.psd1` in this repo:
     EnvPrefix       = 'MYAPP'
     HealthPath      = 'health'
     HasSeed         = $true
-    HasBasePath     = $true
+    HasBasePath     = $true            # $false: dedicated hostname only
     NginxExtra      = ''               # or live-events for SSE locations
     EnvExtra        = @('MYAPP_SECURE_COOKIES=1')
     PostInstallNote = 'Optional note printed after install'

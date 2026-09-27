@@ -1439,12 +1439,21 @@ function Resolve-NvkPortParam {
 
 function Resolve-NvkNginxInstallParams {
     param(
+        [Parameter(Mandatory)]$App,
         [string]$ServerName,
         [string]$NginxSite,
         [string]$BasePath,
         [switch]$SkipNginx,
         [string]$InstanceName
     )
+    $server = if ($ServerName) { $ServerName.Trim() } else { '' }
+    $site = if ($NginxSite) { $NginxSite.Trim() } else { '' }
+    $path = if ($BasePath) { $BasePath.Trim('/') } else { '' }
+
+    if (-not $App.HasBasePath -and ($site -or $path)) {
+        Write-NvkError "$($App.AppId) installs at a dedicated hostname only; omit -NginxSite and -BasePath"
+    }
+
     if ($SkipNginx) {
         return [pscustomobject]@{
             ServerName = ''
@@ -1453,11 +1462,6 @@ function Resolve-NvkNginxInstallParams {
             SkipNginx  = $true
         }
     }
-
-    $server = if ($ServerName) { $ServerName.Trim() } else { '' }
-    $site = if ($NginxSite) { $NginxSite.Trim() } else { '' }
-    $path = if ($BasePath) { $BasePath.Trim('/') } else { '' }
-
     if ($server -and $site) {
         Write-NvkError 'use either -ServerName (new site) or -NginxSite (path mount), not both'
     }
@@ -1466,14 +1470,22 @@ function Resolve-NvkNginxInstallParams {
     }
 
     if (-not $server -and -not $site) {
+        $modeChoices = [System.Collections.Generic.List[object]]::new()
+        $modeChoices.Add((New-NvkChoice -Label 'dedicated hostname (new site)' -Value 'hostname'))
+        if ($App.HasBasePath) {
+            $modeChoices.Add((New-NvkChoice -Label 'path on an existing site' -Value 'path'))
+        }
+        $modeChoices.Add((New-NvkChoice -Label 'skip nginx' -Value 'skip'))
+        $modeMissing = if ($App.HasBasePath) {
+            'provide -ServerName HOST or -NginxSite FILE (or -SkipNginx)'
+        }
+        else {
+            "provide -ServerName HOST ($($App.AppId) installs at a dedicated hostname only) or -SkipNginx"
+        }
         $mode = Read-NvkChoice `
             -Message 'How should nginx expose this instance?' `
-            -Choices @(
-                (New-NvkChoice -Label 'dedicated hostname (new site)' -Value 'hostname')
-                (New-NvkChoice -Label 'path on an existing site' -Value 'path')
-                (New-NvkChoice -Label 'skip nginx' -Value 'skip')
-            ) `
-            -MissingError 'provide -ServerName HOST or -NginxSite FILE (or -SkipNginx)'
+            -Choices @($modeChoices) `
+            -MissingError $modeMissing
         if ($mode -eq 'skip') {
             return [pscustomobject]@{
                 ServerName = ''
@@ -1631,12 +1643,19 @@ function Install-NvkAppInstance {
 
     $BasePath = if ($BasePath) { $BasePath.Trim('/') } else { '' }
 
+    if (-not $app.HasBasePath -and ($NginxSite -or $BasePath)) {
+        Write-NvkError "$($app.AppId) installs at a dedicated hostname only; omit -NginxSite and -BasePath"
+    }
+
     if (-not $SkipNginx) {
         if ($ServerName -and $NginxSite) {
             Write-NvkError 'use either -ServerName (new site) or -NginxSite (path mount), not both'
         }
         if (-not $ServerName -and -not $NginxSite) {
-            Write-NvkError 'provide -ServerName HOST or -NginxSite FILE (or -SkipNginx)'
+            if ($app.HasBasePath) {
+                Write-NvkError 'provide -ServerName HOST or -NginxSite FILE (or -SkipNginx)'
+            }
+            Write-NvkError "provide -ServerName HOST ($($app.AppId) installs at a dedicated hostname only) or -SkipNginx"
         }
         if ($NginxSite -and -not $BasePath) {
             Write-NvkError '-NginxSite requires -BasePath (path mounts need a URL prefix)'

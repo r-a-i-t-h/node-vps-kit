@@ -12,6 +12,9 @@ GitHub Release and writes systemd and nginx for one named instance.
 sudo nvk-app-install -App proseden -Name www -ServerName www.proseden.co.uk -Port 3336
 
 .EXAMPLE
+sudo nvk-app-install -App tessera -Name www -ServerName www.example.com -Port 7356
+
+.EXAMPLE
 sudo nvk-app-install
 # On a terminal, missing flags are chosen from a numbered menu.
 #>
@@ -62,9 +65,11 @@ Import-Module (Join-Path $moduleRoot 'Nvk.psm1') -Force
 Set-NvkCommand 'install'
 
 $App = Resolve-NvkAppIdParam -AppId $App
+$appProfile = Import-NvkApp $App
 $Name = Resolve-NvkInstanceNameParam -AppId $App -Name $Name -For New
 $Port = Resolve-NvkPortParam -Port $Port
 $nginx = Resolve-NvkNginxInstallParams `
+    -App $appProfile `
     -ServerName $ServerName `
     -NginxSite $NginxSite `
     -BasePath $BasePath `

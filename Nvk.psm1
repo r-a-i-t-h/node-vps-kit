@@ -48,6 +48,9 @@ function Get-NvkPwshPath {
 function Invoke-NvkNative {
     param(
         [switch]$AllowFailure,
+        # Drop stdout. Exit-code checks must not see it: PowerShell's -eq/-ne
+        # filter arrays, so a printed line plus exit 0 is treated as failure.
+        [switch]$Quiet,
         [Parameter(Mandatory)]
         [string[]]$Command
     )
@@ -62,13 +65,18 @@ function Invoke-NvkNative {
     $prev = $PSNativeCommandUseErrorActionPreference
     try {
         $global:PSNativeCommandUseErrorActionPreference = $false
-        & $exe @rest
+        if ($Quiet) {
+            & $exe @rest | Out-Null
+        }
+        else {
+            & $exe @rest | Out-Host
+        }
         $code = $LASTEXITCODE
         if ($null -eq $code) { $code = 0 }
         if (-not $AllowFailure -and $code -ne 0) {
             Write-NvkError "command failed ($code): $exe $($rest -join ' ')"
         }
-        return $code
+        return [int]$code
     }
     finally {
         $global:PSNativeCommandUseErrorActionPreference = $prev
@@ -632,7 +640,7 @@ function Initialize-NvkSystemUser {
         [Parameter(Mandatory)][string]$User,
         [Parameter(Mandatory)][string]$Home
     )
-    $exists = Invoke-NvkNative -AllowFailure -Command @('id', $User)
+    $exists = Invoke-NvkNative -AllowFailure -Quiet -Command @('id', $User)
     if ($exists -eq 0) { return }
     Write-NvkInfo "creating system user $User"
     Assert-NvkCommand useradd
@@ -1084,7 +1092,7 @@ function Invoke-NvkPostUpdateHook {
     $parts.Add($hook)
     $cmd = $parts -join ' '
     $ok = 1
-    $idOk = Invoke-NvkNative -AllowFailure -Command @('id', $RunUser)
+    $idOk = Invoke-NvkNative -AllowFailure -Quiet -Command @('id', $RunUser)
     if ($idOk -eq 0) {
         $ok = Invoke-NvkNative -AllowFailure -Command @('su', '-s', '/bin/sh', '-c', $cmd, $RunUser)
     }
@@ -1753,7 +1761,7 @@ function Update-NvkAppInstance {
 
     Write-NvkInfo "upgrading ${Name}: $(if ($prev) { $prev } else { 'unknown' }) → $tag"
     Backup-NvkInstanceData -Data $data -BackupDir $backup | Out-Null
-    $idOk = Invoke-NvkNative -AllowFailure -Command @('id', $runUser)
+    $idOk = Invoke-NvkNative -AllowFailure -Quiet -Command @('id', $runUser)
     if ($idOk -eq 0) {
         Set-NvkOwner -User $runUser -Path @($backup)
     }
@@ -1875,7 +1883,7 @@ function Add-NvkStartup {
     $unitPath = Get-NvkUnitPath $app.AppId $Name
     $fromUnit = Get-NvkUnitUser $unitPath
     if ($fromUnit) { $runUser = $fromUnit }
-    $idOk = Invoke-NvkNative -AllowFailure -Command @('id', $runUser)
+    $idOk = Invoke-NvkNative -AllowFailure -Quiet -Command @('id', $runUser)
     if ($idOk -ne 0) {
         Initialize-NvkSystemUser -User $runUser -Home $app.Prefix
     }

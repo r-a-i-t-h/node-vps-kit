@@ -12,8 +12,9 @@ nginx are left in place. -Add recreates the unit from the template and enable --
 sudo nvk-startup
 sudo nvk-startup -Remove -App proseden -Name www
 sudo nvk-startup -Add -App proseden -Name www
-sudo nvk-startup -Remove
-# On a terminal, missing -App/-Name are chosen from a numbered menu.
+sudo nvk-startup -List
+# On a terminal, a bare run chooses add or remove from a numbered menu.
+# Missing -App/-Name are chosen from a numbered menu.
 #>
 [CmdletBinding(DefaultParameterSetName = 'List')]
 param(
@@ -64,14 +65,18 @@ startup: kit not found. Install the kit first:
 Import-Module (Join-Path $moduleRoot 'Nvk.psm1') -Force
 Set-NvkCommand 'startup'
 
-if ($Remove) {
-    $target = Resolve-NvkStartupTarget -AppId $App -Name $Name -Action Remove
-    Remove-NvkStartup -AppId $target.AppId -Name $target.Name
+$action = $null
+if ($Remove) { $action = 'Remove' }
+elseif ($Add) { $action = 'Add' }
+
+if (-not $action) {
+    $rows = @(Get-NvkStartup -AppId $App -Name $Name)
+    Write-NvkStartupTable $rows
+    if ($rows.Count -eq 0 -or $List -or -not (Test-NvkInteractive)) {
+        return
+    }
+    $action = Resolve-NvkStartupAction
 }
-elseif ($Add) {
-    $target = Resolve-NvkStartupTarget -AppId $App -Name $Name -Action Add
-    Add-NvkStartup -AppId $target.AppId -Name $target.Name
-}
-else {
-    Write-NvkStartupTable (Get-NvkStartup -AppId $App -Name $Name)
-}
+
+$target = Resolve-NvkStartupTarget -AppId $App -Name $Name -Action $action
+Invoke-NvkStartupAction -Action $action -AppId $target.AppId -Name $target.Name

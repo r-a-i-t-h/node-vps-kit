@@ -1537,6 +1537,16 @@ function Resolve-NvkNginxInstallParams {
     }
 }
 
+function Resolve-NvkStartupAction {
+    Read-NvkChoice `
+        -Message 'Add or remove the boot unit?' `
+        -Choices @(
+            (New-NvkChoice -Label 'add' -Value 'Add')
+            (New-NvkChoice -Label 'remove' -Value 'Remove')
+        ) `
+        -MissingError 'pass -Add or -Remove'
+}
+
 function Resolve-NvkStartupTarget {
     param(
         [string]$AppId,
@@ -1580,6 +1590,20 @@ function Resolve-NvkStartupTarget {
         -Choices $choices `
         -MissingError "-App and -Name are required for -$Action"
     [pscustomobject]@{ AppId = $picked.App; Name = $picked.Name }
+}
+
+function Invoke-NvkStartupAction {
+    param(
+        [Parameter(Mandatory)][ValidateSet('Add', 'Remove')][string]$Action,
+        [Parameter(Mandatory)][string]$AppId,
+        [Parameter(Mandatory)][string]$Name
+    )
+    if ($Action -eq 'Remove') {
+        Remove-NvkStartup -AppId $AppId -Name $Name
+    }
+    else {
+        Add-NvkStartup -AppId $AppId -Name $Name
+    }
 }
 
 function Install-NvkAppInstance {

@@ -148,13 +148,18 @@ Install already `enable --now`s a systemd unit named `<app>-<instance>` so the
 process starts on VPS boot.
 
 ```bash
-sudo nvk-startup                          # list
+sudo nvk-startup
 sudo nvk-startup -Remove -App proseden -Name www
 sudo nvk-startup -Add -App proseden -Name www
-sudo nvk-startup -Remove                  # pick the instance from a menu
+sudo nvk-startup -List
 ```
 
-`-Remove` only drops the unit (stop, disable, delete the file). Code, data, and
+On a terminal, `sudo nvk-startup` prints each instance, then a numbered menu
+for add or remove, then the instance (`1` / `a` selects the first item).
+`-List` prints the table and exits. Non-interactive runs need the action and
+`-App` / `-Name`.
+
+`-Remove` drops the unit (stop, disable, delete the file). Code, data, and
 nginx stay. `-Add` writes the unit from the template again and `enable --now`.
 
 ## Layout on disk

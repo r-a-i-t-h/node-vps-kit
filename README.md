@@ -46,7 +46,8 @@ sudo pwsh -File /tmp/nvk-bootstrap.ps1
 That writes `/usr/local/lib/node-vps-kit` and PATH wrappers:
 
 - `/usr/local/sbin/nvk-update` — refresh this kit (and app profiles)
-- `/usr/local/sbin/nvk-startup`
+- `/usr/local/sbin/nvk-startup` — add or remove the boot unit
+- `/usr/local/sbin/nvk-service` — start, stop, or restart the running service
 - `/usr/local/sbin/nvk-app-install` / `nvk-app-update` — install or update an app instance
 
 Wrappers use `#!/snap/bin/pwsh`.
@@ -115,6 +116,32 @@ Private GitHub repos: export `GITHUB_TOKEN` with read access.
 If a kit update installs a broken copy, recover with another `curl | sudo pwsh`
 of `bootstrap.ps1` from GitHub (there is no kit version history).
 
+## Start and stop a server
+
+`nvk-service` starts, stops, and restarts the systemd service for an installed
+instance. The service name is `<app>-<name>` (the `www` instance of `proseden`
+is `proseden-www`). The unit file and its boot setting stay in place, as do
+code, `data/`, `env`, and nginx. An enabled service that you have stopped
+comes back on the next boot.
+
+```bash
+sudo nvk-service
+sudo nvk-service -Stop -App proseden -Name www
+sudo nvk-service -Start -App proseden -Name www
+sudo nvk-service -Restart -App proseden -Name www
+sudo nvk-service -List
+```
+
+On a terminal, `sudo nvk-service` prints each service’s state, then a numbered
+menu for start, stop, or restart, then the instance (`1` / `a` selects the
+first item). `-List` prints the table and exits. Non-interactive runs need the
+action and `-App` / `-Name`.
+
+Logs: `sudo journalctl -u proseden-www -f`
+
+Dropping the unit so it stays down across reboot is `nvk-startup -Remove`, in
+the next section.
+
 ## Boot units (startup)
 
 Install already `enable --now`s a systemd unit named `<app>-<instance>` so the
@@ -143,6 +170,7 @@ nginx stay. `-Add` writes the unit from the template again and `enable --now`.
 /usr/local/lib/node-vps-kit/   # this kit (one copy)
 /usr/local/sbin/nvk-update
 /usr/local/sbin/nvk-startup
+/usr/local/sbin/nvk-service
 /usr/local/sbin/nvk-app-install
 /usr/local/sbin/nvk-app-update
 

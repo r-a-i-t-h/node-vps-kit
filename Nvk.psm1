@@ -1,4 +1,4 @@
-# Shared helpers for node-vps-kit. Used by bootstrap.ps1, install.ps1, update.ps1, startup.ps1.
+# Shared helpers for node-vps-kit. Used by bootstrap.ps1, install.ps1, update.ps1, startup.ps1, service.ps1.
 
 Set-StrictMode -Version Latest
 
@@ -235,7 +235,7 @@ function Install-NvkKitAndWrappers {
 
     New-Item -ItemType Directory -Path $lib -Force | Out-Null
     if (-not (Test-NvkIsInstalledKitRoot $Source)) {
-        foreach ($name in @('bootstrap.ps1', 'install.ps1', 'update.ps1', 'startup.ps1', 'Nvk.psm1', 'README.md')) {
+        foreach ($name in @('bootstrap.ps1', 'install.ps1', 'update.ps1', 'startup.ps1', 'service.ps1', 'Nvk.psm1', 'README.md')) {
             $src = Join-Path $Source $name
             if (Test-Path -LiteralPath $src) {
                 Copy-Item -LiteralPath $src -Destination (Join-Path $lib $name) -Force
@@ -257,7 +257,7 @@ function Install-NvkKitAndWrappers {
                 Remove-Item -LiteralPath $path -Recurse -Force
             }
         }
-        foreach ($entry in @('bootstrap.ps1', 'install.ps1', 'update.ps1', 'startup.ps1')) {
+        foreach ($entry in @('bootstrap.ps1', 'install.ps1', 'update.ps1', 'startup.ps1', 'service.ps1')) {
             $p = Join-Path $lib $entry
             if (Test-Path -LiteralPath $p) {
                 Invoke-NvkNative -Command @('chmod', '755', $p) | Out-Null
@@ -278,12 +278,14 @@ function Install-NvkKitAndWrappers {
     $appInstallWrap = Join-Path $script:NvkSbinDir 'nvk-app-install'
     $appUpdateWrap = Join-Path $script:NvkSbinDir 'nvk-app-update'
     $startupWrap = Join-Path $script:NvkSbinDir 'nvk-startup'
+    $serviceWrap = Join-Path $script:NvkSbinDir 'nvk-service'
     $kitUpdateWrap = Join-Path $script:NvkSbinDir 'nvk-update'
     Write-NvkFile $appInstallWrap (New-NvkWrapperScript -Target "$lib/install.ps1")
     Write-NvkFile $appUpdateWrap (New-NvkWrapperScript -Target "$lib/update.ps1")
     Write-NvkFile $startupWrap (New-NvkWrapperScript -Target "$lib/startup.ps1")
+    Write-NvkFile $serviceWrap (New-NvkWrapperScript -Target "$lib/service.ps1")
     Write-NvkFile $kitUpdateWrap (New-NvkWrapperScript -Target "$lib/bootstrap.ps1")
-    foreach ($wrap in @($appInstallWrap, $appUpdateWrap, $startupWrap, $kitUpdateWrap)) {
+    foreach ($wrap in @($appInstallWrap, $appUpdateWrap, $startupWrap, $serviceWrap, $kitUpdateWrap)) {
         Invoke-NvkNative -Command @('chmod', '755', $wrap) | Out-Null
     }
 
@@ -1901,4 +1903,111 @@ function Write-NvkStartupTable {
     }
     $list | Select-Object App, Name, Service, Present, Enabled, Active, Instance |
         Format-Table -AutoSize | Out-String | Write-Host
+}
+
+function Get-NvkServiceRows {
+    param(
+        [string]$AppId,
+        [string]$Name
+    )
+    @(Get-NvkStartup -AppId $AppId -Name $Name | Where-Object { $_.Present })
+}
+
+function Write-NvkServiceTable {
+    param($Rows)
+    $list = @($Rows)
+    if ($list.Count -eq 0) {
+        Write-NvkInfo 'no systemd units for kit instances (install an app, or nvk-startup -Add)'
+        return
+    }
+    $list | Sort-Object App, Name | ForEach-Object {
+        [pscustomobject]@{
+            App     = $_.App
+            Name    = $_.Name
+            Service = $_.Service
+            State   = if ($_.Active) { 'running' } else { 'stopped' }
+        }
+    } | Format-Table -AutoSize | Out-String | Write-Host
+}
+
+function Resolve-NvkServiceAction {
+    Read-NvkChoice `
+        -Message 'Start, stop, or restart the service?' `
+        -Choices @(
+            (New-NvkChoice -Label 'start' -Value 'Start')
+            (New-NvkChoice -Label 'stop' -Value 'Stop')
+            (New-NvkChoice -Label 'restart' -Value 'Restart')
+        ) `
+        -MissingError 'pass -Start, -Stop, or -Restart'
+}
+
+function Resolve-NvkServiceTarget {
+    param(
+        [string]$AppId,
+        [string]$Name,
+        [Parameter(Mandatory)][ValidateSet('Start', 'Stop', 'Restart')][string]$Action
+    )
+    $app = if ($AppId) { $AppId.Trim() } else { '' }
+    $inst = if ($Name) { $Name.Trim() } else { '' }
+    if ($inst) { Assert-NvkName $inst }
+
+    if ($app -and $inst) {
+        return [pscustomobject]@{ AppId = $app; Name = $inst }
+    }
+
+    $rows = @(Get-NvkServiceRows -AppId $app -Name $inst)
+    if ($rows.Count -eq 0) {
+        $need = if (-not $app -and -not $inst) { '-App and -Name are required' } elseif (-not $app) { '-App is required' } else { '-Name is required' }
+        Write-NvkError "$need (no systemd units to $($Action.ToLowerInvariant()))"
+    }
+
+    $choices = @(
+        $rows | Sort-Object App, Name | ForEach-Object {
+            $state = if ($_.Active) { 'running' } else { 'stopped' }
+            New-NvkChoice -Label "$($_.App) / $($_.Name) ($state)" -Value $_
+        }
+    )
+    $picked = Read-NvkChoice `
+        -Message "-$Action needs an instance. Select one." `
+        -Choices $choices `
+        -MissingError "-App and -Name are required for -$Action"
+    [pscustomobject]@{ AppId = $picked.App; Name = $picked.Name }
+}
+
+function Invoke-NvkServiceAction {
+    param(
+        [Parameter(Mandatory)][ValidateSet('Start', 'Stop', 'Restart')][string]$Action,
+        [Parameter(Mandatory)][string]$AppId,
+        [Parameter(Mandatory)][string]$Name
+    )
+    Assert-NvkRoot
+    Assert-NvkName $Name
+    $null = Import-NvkApp $AppId
+    Assert-NvkCommand systemctl
+    $svc = Get-NvkServiceName $AppId $Name
+    $unit = Get-NvkUnitPath $AppId $Name
+    if (-not (Test-Path -LiteralPath $unit)) {
+        Write-NvkError "no systemd unit $unit — add it with: nvk-startup -Add -App $AppId -Name $Name"
+    }
+    $verb = $Action.ToLowerInvariant()
+    Invoke-NvkNative -Command @('systemctl', $verb, $svc) | Out-Null
+    if ($Action -ne 'Stop') {
+        Start-Sleep -Seconds 1
+    }
+    $active = Test-NvkSystemdActive $svc
+    if ($Action -eq 'Stop') {
+        if ($active) {
+            Show-NvkServiceJournal $svc
+            Write-NvkError "service $svc failed to stop"
+        }
+        Write-NvkInfo "stopped $svc"
+        return
+    }
+    if (-not $active) {
+        Show-NvkServiceJournal $svc
+        $why = if ($Action -eq 'Restart') { 'failed to restart' } else { 'failed to start' }
+        Write-NvkError "service $svc $why"
+    }
+    $word = if ($Action -eq 'Restart') { 'restarted' } else { 'started' }
+    Write-NvkInfo "$word $svc"
 }

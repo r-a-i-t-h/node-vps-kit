@@ -1,7 +1,7 @@
 # Decision: kit as a first-class local tool
 
 Status: **accepted and implemented**.
-The kit on disk is PowerShell 7 (`bootstrap.ps1`, `install.ps1`, `update.ps1`, `startup.ps1`, `Nvk.psm1`).
+The kit on disk is PowerShell 7 (`bootstrap.ps1`, `install.ps1`, `update.ps1`, `startup.ps1`, `service.ps1`, `Nvk.psm1`).
 Kit freshness is an **explicit** operator action (`nvk-update` / piped `bootstrap.ps1`). App install and app update do not refresh the kit.
 
 Context: extracted from Proseden deploy scripts; rewritten in pwsh in this repo.
@@ -48,7 +48,7 @@ Mental model: *you own the tool; the tool installs apps.* App releases (`dist/`,
 1. **First-class kit bootstrap**
    - `bootstrap.ps1`, curl|pwshable.
    - Installs/refreshes `/usr/local/lib/node-vps-kit`.
-   - Installs PATH commands: `nvk-update`, `nvk-startup`, `nvk-app-install`, `nvk-app-update`.
+   - Installs PATH commands: `nvk-update`, `nvk-startup`, `nvk-service`, `nvk-app-install`, `nvk-app-update`.
 
 2. **First-class kit self-update**
    - Explicit: `nvk-update` fetches `KIT_REPO` @ `KIT_REF` and replaces the local tree + wrappers (including new app profiles).
@@ -65,6 +65,7 @@ Mental model: *you own the tool; the tool installs apps.* App releases (`dist/`,
 
 5. **Wrappers**
    - Fixed: `/usr/local/sbin/nvk-app-install`, `nvk-app-update` → kit `install.ps1` / `update.ps1`.
+   - Running service: `nvk-service` → `service.ps1` (`systemctl` start / stop / restart).
    - Kit self: `nvk-update`, `nvk-startup`.
    - Created/refreshed when the kit is installed or `nvk-update`d; stale per-app wrappers are removed.
 

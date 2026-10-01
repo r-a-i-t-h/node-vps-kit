@@ -1884,9 +1884,14 @@ function Test-NvkFileOrLink {
 
 function Test-NvkNginxSnippetIncludeLine {
     param(
-        [Parameter(Mandatory)][string]$Line,
+        # Blank lines are normal in nginx configs. A mandatory [string] rejects ""
+        # and would abort uninstall while scanning sites that are not this instance.
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string]$Line,
         [Parameter(Mandatory)][string]$SnippetName
     )
+    if ([string]::IsNullOrWhiteSpace($Line)) { return $false }
     $pattern = '^\s*include\s+["'']?(?:\S*/)?snippets/' + [regex]::Escape($SnippetName) + '["'']?\s*;\s*(?:#.*)?$'
     [bool]($Line -match $pattern)
 }

@@ -71,6 +71,8 @@ That command:
 3. Unpacks under `/opt/<app>/<name>/releases/<tag>` and points `current` at it.
 4. Creates empty `data/` (the app may seed on first boot), writes `env`, systemd unit, nginx.
 
+The nginx site proxies every path to Node, including `/`, and sends `Cache-Control: private, max-age=0, must-revalidate`. Browsers and shared caches must ask again before reusing a response. Nginx does not store those responses and does not invent an ETag; it forwards one when the app sends it. That file is written at install. App update does not rewrite it.
+
 It does **not** refresh the kit. If the app profile is missing, update the kit
 first (`sudo nvk-update`).
 

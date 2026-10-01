@@ -402,8 +402,10 @@ sudo systemctl status proseden-www
 curl -sS http://127.0.0.1:3336/health
 ```
 
-From the **Mac** browser, until TLS is set up, use `http://www.example.test/`
-if `/etc/hosts` and the port-80 forward are in place (and nginx is up).
+From the **Mac** browser, use `http://www.example.test/` or
+`https://www.example.test/` once `/etc/hosts`, the port forwards, and
+`local-tls.conf` are in place. Install runs `nginx -t`, so the certificate
+has to exist before that site will load.
 
 ## Certbot versus mkcert
 
@@ -519,11 +521,13 @@ ssl_certificate_key /etc/nginx/ssl/_wildcard.example.test+1-key.pem;
 A `server` that needs some other certificate can set its own pair. Those
 lines replace the inherited ones for that server only.
 
-**Each app** still needs to accept TLS. The kit’s site file only has
-`listen 80`. The shared certificate does not add a listener. After install,
-edit that site (for example `/etc/nginx/sites-available/proseden-www`) and
-add the two `listen 443 ssl` lines to the existing `server`. Leave the
-certificate lines out; this block inherits `local-tls.conf`.
+**Each app** already accepts TLS. The site file under
+`/etc/nginx/sites-available` listens on 80 and on `443 ssl`. The shared
+certificate does not add a listener; those `listen` lines do. Leave the
+certificate lines out of the site; this block inherits `local-tls.conf`.
+
+Write `local-tls.conf` **before** `install.ps1`. Install runs `nginx -t`,
+and a `listen 443 ssl` server with no certificate will not load.
 
 ```nginx
 server {
@@ -582,8 +586,8 @@ browse, all aimed at `127.0.0.1` (or the vzNAT address):
 ```
 
 Open `https://www.example.test/`. Another host under `example.test` is a
-new hosts line plus `listen 443 ssl` on that site. The certificate file and
-`local-tls.conf` stay as they are.
+new hosts line and a new install. The certificate file and `local-tls.conf`
+stay as they are. The new site already has `listen 443 ssl`.
 
 A **self-signed** certificate you generate with `openssl` also encrypts the
 pipe, but the Mac browser will warn on every visit unless you trust it by
@@ -649,8 +653,10 @@ mkcert "*.example.test" example.test
 sudo nano /etc/hosts   # 127.0.0.1 example.test www.example.test api.example.test
 ```
 
-Then, in the **guest**, copy the pem files to `/etc/nginx/ssl/`, write
-`/etc/nginx/conf.d/local-tls.conf` with the two `ssl_certificate` lines, add
-`listen 443 ssl` to each site (no certificate lines there), and
+Then, in the **guest**, copy the pem files to `/etc/nginx/ssl/` and write
+`/etc/nginx/conf.d/local-tls.conf` with the two `ssl_certificate` lines
+**before** installing a site. Site files already have `listen 443 ssl` and
+do not repeat the certificate lines. If sites were installed first,
+`nginx -t` fails until `local-tls.conf` exists; then
 `systemctl reload nginx`. A new `*.example.test` host is a hosts line and
-`listen 443 ssl` only.
+another install.

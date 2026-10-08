@@ -11,7 +11,7 @@
     HealthPath      = 'health'
     HasSeed         = $true
     HasBasePath     = $false
-    NginxExtra      = ''
+    NginxExtra      = 'upload-limit'
     EnvExtra        = @(
         'TESSERA_SECURE_COOKIES=1'
     )

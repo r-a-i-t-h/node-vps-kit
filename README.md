@@ -48,10 +48,23 @@ That writes `/usr/local/lib/node-vps-kit` and PATH wrappers:
 - `/usr/local/sbin/nvk-update` — refresh this kit (and app profiles)
 - `/usr/local/sbin/nvk-startup` — add or remove the boot unit
 - `/usr/local/sbin/nvk-service` — start, stop, or restart the running service
+- `/usr/local/sbin/nvk-info` — kit version, installable apps, host summary, installed instances
 - `/usr/local/sbin/nvk-app-install` / `nvk-app-update` — install or update an app instance
 - `/usr/local/sbin/nvk-app-uninstall` — delete an app instance (nginx, systemd, and its directory)
 
 Wrappers use `#!/snap/bin/pwsh`.
+
+Those commands are wrappers, not renamed copies. The kit files stay under `/usr/local/lib/node-vps-kit` with their repo names. Each wrapper is a short `pwsh` script that runs the matching file and forwards its arguments:
+
+| Command | Runs |
+|---|---|
+| `nvk-update` | `bootstrap.ps1` |
+| `nvk-startup` | `startup.ps1` |
+| `nvk-service` | `service.ps1` |
+| `nvk-info` | `info.ps1` |
+| `nvk-app-install` | `install.ps1` |
+| `nvk-app-uninstall` | `uninstall.ps1` |
+| `nvk-app-update` | `update.ps1` |
 
 ## Install an app
 
@@ -137,6 +150,24 @@ Private GitHub repos: export `GITHUB_TOKEN` with read access.
 If a kit update installs a broken copy, recover with another `curl | sudo pwsh`
 of `bootstrap.ps1` from GitHub (there is no kit version history).
 
+## Kit and host info
+
+```bash
+sudo nvk-info
+```
+
+Prints the kit version and commit date, the apps this kit can install, a short host summary
+(CPU, memory, disk, load, uptime, Node, and PowerShell), then the installed
+instances. That last section is `nvk-service -List` (the switch is `-List`).
+
+The version is a short git commit, then `repo@ref`. `committed` is that
+commit’s date in UTC — the stand-in for a kit version number. Install and
+update record both on the box. A checkout (`pwsh -File info.ps1`, or
+`NVK_ROOT`) shows that checkout’s commit and its date. If the commit cannot
+be read, the version line is just `repo@ref`. The command does not change the
+kit or any instance, and it does not need root when `nvk-info` is already on
+`PATH`.
+
 ## Start and stop a server
 
 `nvk-service` starts, stops, and restarts the systemd service for an installed
@@ -198,6 +229,7 @@ To delete the instance directory and nginx as well, use `nvk-app-uninstall`.
 /usr/local/sbin/nvk-update
 /usr/local/sbin/nvk-startup
 /usr/local/sbin/nvk-service
+/usr/local/sbin/nvk-info
 /usr/local/sbin/nvk-app-install
 /usr/local/sbin/nvk-app-uninstall
 /usr/local/sbin/nvk-app-update

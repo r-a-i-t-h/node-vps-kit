@@ -1,4 +1,4 @@
-# Shared helpers for node-vps-kit. Used by bootstrap.ps1, install.ps1, uninstall.ps1, update.ps1, startup.ps1, service.ps1.
+# Shared helpers for node-vps-kit. Used by bootstrap.ps1, install.ps1, uninstall.ps1, update.ps1, startup.ps1, service.ps1, info.ps1.
 
 Set-StrictMode -Version Latest
 
@@ -24,6 +24,190 @@ function Get-NvkKitRepo {
 function Get-NvkKitRef {
     if ($env:KIT_REF) { return $env:KIT_REF }
     'main'
+}
+
+function Read-NvkRevisionFile {
+    param([Parameter(Mandatory)][string]$Path)
+    $result = @{ Sha = ''; Ref = ''; Repo = ''; Date = '' }
+    if (-not (Test-Path -LiteralPath $Path)) { return $result }
+    foreach ($line in @(Get-Content -LiteralPath $Path)) {
+        if ($line -like 'sha=*') { $result.Sha = $line.Substring(4).Trim() }
+        elseif ($line -like 'ref=*') { $result.Ref = $line.Substring(4).Trim() }
+        elseif ($line -like 'repo=*') { $result.Repo = $line.Substring(5).Trim() }
+        elseif ($line -like 'date=*') { $result.Date = $line.Substring(5).Trim() }
+    }
+    $result
+}
+
+function Format-NvkCommitInstant {
+    param(
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string]$Text
+    )
+    if ([string]::IsNullOrWhiteSpace($Text)) { return $null }
+    $raw = $Text.Trim()
+    try {
+        $dto = [datetimeoffset]::Parse(
+            $raw,
+            [cultureinfo]::InvariantCulture,
+            [System.Globalization.DateTimeStyles]::RoundtripKind
+        )
+        return $dto.UtcDateTime.ToString('yyyy-MM-dd HH:mm') + ' UTC'
+    }
+    catch {
+        return $raw
+    }
+}
+
+function Get-NvkGitHead {
+    param([Parameter(Mandatory)][string]$Root)
+    if (-not (Test-Path -LiteralPath (Join-Path $Root '.git'))) { return $null }
+    if (-not (Test-NvkCommandExists 'git')) { return $null }
+    $prev = $PSNativeCommandUseErrorActionPreference
+    try {
+        $global:PSNativeCommandUseErrorActionPreference = $false
+        $sha = @(& git -C $Root rev-parse HEAD 2>$null) | Select-Object -First 1
+        if ($LASTEXITCODE -ne 0 -or -not $sha) { return $null }
+        ([string]$sha).Trim()
+    }
+    finally {
+        $global:PSNativeCommandUseErrorActionPreference = $prev
+    }
+}
+
+function Get-NvkGitCommitDate {
+    param([Parameter(Mandatory)][string]$Root)
+    if (-not (Test-Path -LiteralPath (Join-Path $Root '.git'))) { return $null }
+    if (-not (Test-NvkCommandExists 'git')) { return $null }
+    $prev = $PSNativeCommandUseErrorActionPreference
+    try {
+        $global:PSNativeCommandUseErrorActionPreference = $false
+        $when = @(& git -C $Root log -1 --format=%cI 2>$null) | Select-Object -First 1
+        if ($LASTEXITCODE -ne 0 -or -not $when) { return $null }
+        ([string]$when).Trim()
+    }
+    finally {
+        $global:PSNativeCommandUseErrorActionPreference = $prev
+    }
+}
+
+function Get-NvkGitBranch {
+    param([Parameter(Mandatory)][string]$Root)
+    if (-not (Test-Path -LiteralPath (Join-Path $Root '.git'))) { return $null }
+    if (-not (Test-NvkCommandExists 'git')) { return $null }
+    $prev = $PSNativeCommandUseErrorActionPreference
+    try {
+        $global:PSNativeCommandUseErrorActionPreference = $false
+        $name = @(& git -C $Root rev-parse --abbrev-ref HEAD 2>$null) | Select-Object -First 1
+        if ($LASTEXITCODE -ne 0 -or -not $name) { return $null }
+        $branch = ([string]$name).Trim()
+        if (-not $branch -or $branch -eq 'HEAD') { return $null }
+        $branch
+    }
+    finally {
+        $global:PSNativeCommandUseErrorActionPreference = $prev
+    }
+}
+
+function Get-NvkGitHubCommit {
+    param(
+        [Parameter(Mandatory)][string]$Repo,
+        [Parameter(Mandatory)][string]$Ref
+    )
+    $api = "https://api.github.com/repos/$Repo/commits/$Ref"
+    try {
+        $commit = Invoke-RestMethod -Uri $api -Headers (Get-NvkGitHubHeaders) -TimeoutSec 20
+        $shaProp = $commit.PSObject.Properties['sha']
+        if (-not $shaProp -or -not $shaProp.Value) { return $null }
+        $date = $null
+        $body = $commit.PSObject.Properties['commit']
+        if ($body) {
+            $committer = $body.Value.PSObject.Properties['committer']
+            if ($committer) {
+                $dateProp = $committer.Value.PSObject.Properties['date']
+                if ($dateProp -and $dateProp.Value) { $date = [string]$dateProp.Value }
+            }
+        }
+        [pscustomobject]@{ Sha = [string]$shaProp.Value; Date = $date }
+    }
+    catch {
+        return $null
+    }
+}
+
+function Save-NvkKitRevision {
+    param(
+        [Parameter(Mandatory)][string]$Lib,
+        [Parameter(Mandatory)][string]$Source
+    )
+    $sha = Get-NvkGitHead $Source
+    $ref = $null
+    $date = $null
+    if ($sha) {
+        $ref = Get-NvkGitBranch $Source
+        $date = Get-NvkGitCommitDate $Source
+    }
+    else {
+        $stored = Read-NvkRevisionFile (Join-Path $Source 'revision')
+        if ($stored.Sha) {
+            $sha = $stored.Sha
+            $ref = $stored.Ref
+            $date = $stored.Date
+        }
+    }
+    if (-not $sha) {
+        $ref = Get-NvkKitRef
+        $remote = Get-NvkGitHubCommit -Repo (Get-NvkKitRepo) -Ref $ref
+        if ($remote) {
+            $sha = $remote.Sha
+            $date = $remote.Date
+        }
+    }
+    elseif (-not $date) {
+        $remote = Get-NvkGitHubCommit -Repo (Get-NvkKitRepo) -Ref $sha
+        if ($remote -and $remote.Date) { $date = $remote.Date }
+    }
+    if (-not $ref) { $ref = Get-NvkKitRef }
+    $path = Join-Path $Lib 'revision'
+    if (-not $sha) {
+        if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force }
+        return
+    }
+    $repo = Get-NvkKitRepo
+    $lines = @("sha=$sha", "ref=$ref", "repo=$repo")
+    if ($date) { $lines += "date=$date" }
+    Write-NvkFile $path ($lines -join "`n")
+    $short = if ($sha.Length -gt 12) { $sha.Substring(0, 12) } else { $sha }
+    $when = Format-NvkCommitInstant $date
+    $suffix = if ($when) { " $when" } else { '' }
+    Write-NvkInfo "kit revision $short ($repo@$ref)$suffix"
+}
+
+function Get-NvkKitVersionLabel {
+    $stored = Read-NvkRevisionFile (Join-Path $script:NvkKitRoot 'revision')
+    $sha = $stored.Sha
+    $ref = $stored.Ref
+    $repo = $stored.Repo
+    if (-not $sha) { $sha = Get-NvkGitHead $script:NvkKitRoot }
+    if (-not $ref) {
+        $branch = Get-NvkGitBranch $script:NvkKitRoot
+        $ref = if ($branch) { $branch } else { Get-NvkKitRef }
+    }
+    if (-not $repo) { $repo = Get-NvkKitRepo }
+    $short = $null
+    if ($sha) {
+        $short = if ($sha.Length -gt 12) { $sha.Substring(0, 12) } else { $sha }
+    }
+    if ($short) { return "$short ($repo@$ref)" }
+    "$repo@$ref"
+}
+
+function Get-NvkKitCommitDateLabel {
+    $stored = Read-NvkRevisionFile (Join-Path $script:NvkKitRoot 'revision')
+    $raw = $stored.Date
+    if (-not $raw) { $raw = Get-NvkGitCommitDate $script:NvkKitRoot }
+    Format-NvkCommitInstant $raw
 }
 
 function Write-NvkInfo {
@@ -245,7 +429,7 @@ function Install-NvkKitAndWrappers {
 
     New-Item -ItemType Directory -Path $lib -Force | Out-Null
     if (-not (Test-NvkIsInstalledKitRoot $Source)) {
-        foreach ($name in @('bootstrap.ps1', 'install.ps1', 'uninstall.ps1', 'update.ps1', 'startup.ps1', 'service.ps1', 'Nvk.psm1', 'README.md')) {
+        foreach ($name in @('bootstrap.ps1', 'install.ps1', 'uninstall.ps1', 'update.ps1', 'startup.ps1', 'service.ps1', 'info.ps1', 'Nvk.psm1', 'README.md')) {
             $src = Join-Path $Source $name
             if (Test-Path -LiteralPath $src) {
                 Copy-Item -LiteralPath $src -Destination (Join-Path $lib $name) -Force
@@ -267,7 +451,7 @@ function Install-NvkKitAndWrappers {
                 Remove-Item -LiteralPath $path -Recurse -Force
             }
         }
-        foreach ($entry in @('bootstrap.ps1', 'install.ps1', 'uninstall.ps1', 'update.ps1', 'startup.ps1', 'service.ps1')) {
+        foreach ($entry in @('bootstrap.ps1', 'install.ps1', 'uninstall.ps1', 'update.ps1', 'startup.ps1', 'service.ps1', 'info.ps1')) {
             $p = Join-Path $lib $entry
             if (Test-Path -LiteralPath $p) {
                 Invoke-NvkNative -Command @('chmod', '755', $p) | Out-Null
@@ -290,16 +474,19 @@ function Install-NvkKitAndWrappers {
     $appUpdateWrap = Join-Path $script:NvkSbinDir 'nvk-app-update'
     $startupWrap = Join-Path $script:NvkSbinDir 'nvk-startup'
     $serviceWrap = Join-Path $script:NvkSbinDir 'nvk-service'
+    $infoWrap = Join-Path $script:NvkSbinDir 'nvk-info'
     $kitUpdateWrap = Join-Path $script:NvkSbinDir 'nvk-update'
     Write-NvkFile $appInstallWrap (New-NvkWrapperScript -Target "$lib/install.ps1")
     Write-NvkFile $appUninstallWrap (New-NvkWrapperScript -Target "$lib/uninstall.ps1")
     Write-NvkFile $appUpdateWrap (New-NvkWrapperScript -Target "$lib/update.ps1")
     Write-NvkFile $startupWrap (New-NvkWrapperScript -Target "$lib/startup.ps1")
     Write-NvkFile $serviceWrap (New-NvkWrapperScript -Target "$lib/service.ps1")
+    Write-NvkFile $infoWrap (New-NvkWrapperScript -Target "$lib/info.ps1")
     Write-NvkFile $kitUpdateWrap (New-NvkWrapperScript -Target "$lib/bootstrap.ps1")
-    foreach ($wrap in @($appInstallWrap, $appUninstallWrap, $appUpdateWrap, $startupWrap, $serviceWrap, $kitUpdateWrap)) {
+    foreach ($wrap in @($appInstallWrap, $appUninstallWrap, $appUpdateWrap, $startupWrap, $serviceWrap, $infoWrap, $kitUpdateWrap)) {
         Invoke-NvkNative -Command @('chmod', '755', $wrap) | Out-Null
     }
+    Save-NvkKitRevision -Lib $lib -Source $Source
 
     $ids = @(Get-NvkFamilyAppIds -KitRoot $Source)
     $appList = if ($ids.Count) { $ids -join ', ' } else { '(none)' }
@@ -2560,4 +2747,234 @@ function Invoke-NvkServiceAction {
     }
     $word = if ($Action -eq 'Restart') { 'restarted' } else { 'started' }
     Write-NvkInfo "$word $svc"
+}
+
+function Write-NvkFact {
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string]$Value
+    )
+    $shown = if ([string]::IsNullOrWhiteSpace($Value)) { 'unavailable' } else { $Value }
+    Write-Host ('  {0,-12} {1}' -f $Name, $shown)
+}
+
+function Format-NvkBytes {
+    param([Parameter(Mandatory)][int64]$Bytes)
+    $abs = [math]::Abs($Bytes)
+    $sign = if ($Bytes -lt 0) { '-' } else { '' }
+    if ($abs -ge 1GB) { return ('{0}{1:0.0} GiB' -f $sign, ($abs / 1GB)) }
+    if ($abs -ge 1MB) { return ('{0}{1:0.0} MiB' -f $sign, ($abs / 1MB)) }
+    if ($abs -ge 1KB) { return ('{0}{1:0.0} KiB' -f $sign, ($abs / 1KB)) }
+    "$sign$abs B"
+}
+
+function Format-NvkDuration {
+    param([Parameter(Mandatory)][int]$Seconds)
+    if ($Seconds -lt 0) { $Seconds = 0 }
+    $days = [math]::Floor($Seconds / 86400)
+    $hours = [math]::Floor(($Seconds % 86400) / 3600)
+    $mins = [math]::Floor(($Seconds % 3600) / 60)
+    if ($days -gt 0) { return "${days}d ${hours}h ${mins}m" }
+    if ($hours -gt 0) { return "${hours}h ${mins}m" }
+    "${mins}m"
+}
+
+function Get-NvkNativeText {
+    param([Parameter(Mandatory)][string[]]$Command)
+    if ($Command.Count -eq 0) { return $null }
+    if (-not (Test-NvkCommandExists $Command[0])) { return $null }
+    $prev = $PSNativeCommandUseErrorActionPreference
+    try {
+        $global:PSNativeCommandUseErrorActionPreference = $false
+        $exe = $Command[0]
+        $rest = @()
+        if ($Command.Count -gt 1) { $rest = $Command[1..($Command.Count - 1)] }
+        $lines = @(& $exe @rest 2>$null)
+        if ($LASTEXITCODE -ne 0) { return $null }
+        $text = ((@($lines) | ForEach-Object { ([string]$_).Trim() }) | Where-Object { $_ }) -join ' '
+        if (-not $text) { return $null }
+        $text
+    }
+    finally {
+        $global:PSNativeCommandUseErrorActionPreference = $prev
+    }
+}
+
+function Read-NvkOsPrettyName {
+    param([string]$Path = '/etc/os-release')
+    if (-not (Test-Path -LiteralPath $Path)) { return $null }
+    foreach ($line in @(Get-Content -LiteralPath $Path)) {
+        if ($line -notlike 'PRETTY_NAME=*') { continue }
+        $value = $line.Substring('PRETTY_NAME='.Length).Trim()
+        if ($value.Length -ge 2 -and $value.StartsWith('"') -and $value.EndsWith('"')) {
+            $value = $value.Substring(1, $value.Length - 2)
+        }
+        if ($value) { return $value }
+    }
+    $null
+}
+
+function Get-NvkCpuSummary {
+    param([string]$Path = '/proc/cpuinfo')
+    if (-not (Test-Path -LiteralPath $Path)) { return $null }
+    $model = $null
+    $count = 0
+    foreach ($line in @(Get-Content -LiteralPath $Path)) {
+        $name = $null
+        if ($line -like 'model name*:*' -or $line -like 'Model*:*' -or $line -like 'Hardware*:*') {
+            $name = $line.Substring($line.IndexOf(':') + 1).Trim()
+        }
+        if ($name -and -not $model) { $model = $name }
+        if ($line -like 'processor*:*') { $count++ }
+    }
+    if ($count -lt 1) { return $null }
+    $label = if ($count -eq 1) { '1 cpu' } else { "$count cpus" }
+    if ($model) { return "$label, $model" }
+    $label
+}
+
+function Get-NvkMemorySummary {
+    param([string]$Path = '/proc/meminfo')
+    if (-not (Test-Path -LiteralPath $Path)) { return $null }
+    $total = $null
+    $free = $null
+    $avail = $null
+    foreach ($line in @(Get-Content -LiteralPath $Path)) {
+        if ($line -match '^MemTotal:\s+(\d+)') { $total = [int64]$Matches[1] * 1024 }
+        elseif ($line -match '^MemFree:\s+(\d+)') { $free = [int64]$Matches[1] * 1024 }
+        elseif ($line -match '^MemAvailable:\s+(\d+)') { $avail = [int64]$Matches[1] * 1024 }
+    }
+    if ($null -eq $total) { return $null }
+    if ($null -eq $avail) { $avail = $free }
+    if ($null -eq $avail) { return (Format-NvkBytes $total) }
+    $used = $total - $avail
+    if ($used -lt 0) { $used = 0 }
+    '{0} used / {1} ({2} available)' -f (Format-NvkBytes $used), (Format-NvkBytes $total), (Format-NvkBytes $avail)
+}
+
+function Get-NvkDiskReport {
+    param([Parameter(Mandatory)][string]$Path)
+    if (-not (Test-NvkCommandExists 'df')) { return $null }
+    if (-not (Test-Path -LiteralPath $Path)) { return $null }
+    $prev = $PSNativeCommandUseErrorActionPreference
+    $prevLc = $env:LC_ALL
+    try {
+        $global:PSNativeCommandUseErrorActionPreference = $false
+        $env:LC_ALL = 'C'
+        # -k -P is POSIX (1 KiB blocks). GNU df -B1 is not.
+        $lines = @(& df -k -P $Path 2>$null)
+        if ($LASTEXITCODE -ne 0 -or $lines.Count -lt 2) { return $null }
+        $parts = @(($lines[-1] -split '\s+') | Where-Object { $_ })
+        $pctIndex = -1
+        for ($i = 0; $i -lt $parts.Count; $i++) {
+            if ($parts[$i] -match '^\d+%$') { $pctIndex = $i; break }
+        }
+        if ($pctIndex -lt 3) { return $null }
+        $total = [int64]0
+        $used = [int64]0
+        $avail = [int64]0
+        $style = [Globalization.NumberStyles]::Integer
+        $culture = [cultureinfo]::InvariantCulture
+        if (-not [int64]::TryParse([string]$parts[$pctIndex - 3], $style, $culture, [ref]$total)) { return $null }
+        if (-not [int64]::TryParse([string]$parts[$pctIndex - 2], $style, $culture, [ref]$used)) { return $null }
+        if (-not [int64]::TryParse([string]$parts[$pctIndex - 1], $style, $culture, [ref]$avail)) { return $null }
+        $total *= 1024
+        $used *= 1024
+        $avail *= 1024
+        $mount = $Path
+        if ($pctIndex + 1 -lt $parts.Count) {
+            $mount = @($parts[($pctIndex + 1)..($parts.Count - 1)]) -join ' '
+        }
+        $where = if ($mount -eq $Path) { $Path } else { "$Path ($mount)" }
+        $text = '{0}  {1} used / {2} ({3} free, {4})' -f $where, (Format-NvkBytes $used), (Format-NvkBytes $total), (Format-NvkBytes $avail), $parts[$pctIndex]
+        [pscustomobject]@{ Mount = $mount; Text = $text }
+    }
+    finally {
+        $global:PSNativeCommandUseErrorActionPreference = $prev
+        if ($null -eq $prevLc) {
+            Remove-Item Env:LC_ALL -ErrorAction SilentlyContinue
+        }
+        else {
+            $env:LC_ALL = $prevLc
+        }
+    }
+}
+
+function Get-NvkLoadSummary {
+    param([string]$Path = '/proc/loadavg')
+    if (-not (Test-Path -LiteralPath $Path)) { return $null }
+    $parts = @(((Get-Content -LiteralPath $Path -Raw).Trim() -split '\s+') | Where-Object { $_ })
+    if ($parts.Count -lt 3) { return $null }
+    '{0}  {1}  {2}' -f $parts[0], $parts[1], $parts[2]
+}
+
+function Get-NvkUptimeSummary {
+    param([string]$Path = '/proc/uptime')
+    if (-not (Test-Path -LiteralPath $Path)) { return $null }
+    $raw = ((Get-Content -LiteralPath $Path -Raw).Trim() -split '\s+')[0]
+    $seconds = 0.0
+    $ok = [double]::TryParse($raw, [Globalization.NumberStyles]::Float, [cultureinfo]::InvariantCulture, [ref]$seconds)
+    if (-not $ok) { return $null }
+    Format-NvkDuration ([int][math]::Floor($seconds))
+}
+
+function Write-NvkInstallableTable {
+    $rows = [System.Collections.Generic.List[object]]::new()
+    foreach ($id in @(@(Get-NvkFamilyAppIds) | Sort-Object)) {
+        $app = Import-NvkApp $id
+        $nginx = if ($app.HasBasePath) { 'hostname or path' } else { 'hostname' }
+        $rows.Add([pscustomobject]@{
+                App    = $app.AppId
+                Repo   = $app.Repo
+                Node   = ">=$($app.NodeMajor)"
+                Prefix = $app.Prefix
+                Nginx  = $nginx
+            })
+    }
+    if ($rows.Count -eq 0) {
+        Write-NvkInfo 'no app profiles in this kit'
+        return
+    }
+    $rows | Format-Table -AutoSize | Out-String | Write-Host
+}
+
+function Show-NvkInfo {
+    Write-Host ''
+    Write-Host 'kit'
+    Write-NvkFact 'version' (Get-NvkKitVersionLabel)
+    Write-NvkFact 'committed' (Get-NvkKitCommitDateLabel)
+    Write-NvkFact 'path' $script:NvkKitRoot
+
+    Write-Host ''
+    Write-Host 'installable'
+    Write-NvkInstallableTable
+
+    Write-Host ''
+    Write-Host 'system'
+    Write-NvkFact 'host' (Get-NvkFqdn)
+    Write-NvkFact 'os' (Read-NvkOsPrettyName)
+    Write-NvkFact 'kernel' (Get-NvkNativeText @('uname', '-srm'))
+    Write-NvkFact 'cpu' (Get-NvkCpuSummary)
+    Write-NvkFact 'memory' (Get-NvkMemorySummary)
+    $rootDisk = Get-NvkDiskReport '/'
+    $optDisk = Get-NvkDiskReport '/opt'
+    if ($rootDisk) { Write-NvkFact 'disk' $rootDisk.Text } else { Write-NvkFact 'disk' $null }
+    if ($optDisk -and ((-not $rootDisk) -or ($optDisk.Mount -ne $rootDisk.Mount))) {
+        Write-NvkFact 'disk' $optDisk.Text
+    }
+    Write-NvkFact 'load' (Get-NvkLoadSummary)
+    Write-NvkFact 'uptime' (Get-NvkUptimeSummary)
+    $node = Get-NvkNativeText @('node', '-v')
+    Write-NvkFact 'node' $(if ($node) { $node } else { 'not installed' })
+    Write-NvkFact 'powershell' $PSVersionTable.PSVersion.ToString()
+
+    Write-Host ''
+    Write-Host 'installed'
+    $service = Join-Path $script:NvkKitRoot 'service.ps1'
+    if (-not (Test-Path -LiteralPath $service)) {
+        Write-NvkError "missing $service"
+    }
+    & $service -List
 }

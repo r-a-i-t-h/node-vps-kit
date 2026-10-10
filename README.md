@@ -49,6 +49,7 @@ That writes `/usr/local/lib/node-vps-kit` and PATH wrappers:
 - `/usr/local/sbin/nvk-startup` — add or remove the boot unit
 - `/usr/local/sbin/nvk-service` — start, stop, or restart the running service
 - `/usr/local/sbin/nvk-info` — kit version, installable apps, host summary, installed instances
+- `/usr/local/sbin/nvk-nginx` — serve a directory of HTML files (a new hostname, or a path on an existing site)
 - `/usr/local/sbin/nvk-app-install` / `nvk-app-update` — install or update an app instance
 - `/usr/local/sbin/nvk-app-uninstall` — delete an app instance (nginx, systemd, and its directory)
 
@@ -62,6 +63,7 @@ Those commands are wrappers, not renamed copies. The kit files stay under `/usr/
 | `nvk-startup` | `startup.ps1` |
 | `nvk-service` | `service.ps1` |
 | `nvk-info` | `info.ps1` |
+| `nvk-nginx` | `nginx.ps1` |
 | `nvk-app-install` | `install.ps1` |
 | `nvk-app-uninstall` | `uninstall.ps1` |
 | `nvk-app-update` | `update.ps1` |
@@ -99,6 +101,24 @@ first (`sudo nvk-update`).
 Tessera’s profile sets `HasBasePath` to `$false`, so it installs on a dedicated hostname. Proseden accepts either mode.
 
 Multiple instances: different `-Name`, `-Port`, and hostname or base path. Each keeps its own app copy and `data/`.
+
+## Static websites
+
+`nvk-nginx` serves a directory of HTML files. It does not install a Node app and it does not proxy. Use it for a published site, such as a Tessera export.
+
+```bash
+sudo nvk-nginx -ServerName books.example.com -Root /var/www/books
+sudo nvk-nginx -NginxSite /etc/nginx/sites-available/www.example.com -BasePath books -Root /var/www/books
+sudo nvk-nginx
+```
+
+Omit flags on a terminal and the command asks. The usual case is a new hostname (a subdomain). The other case adds a URL prefix on a site that already exists.
+
+A new hostname writes `/etc/nginx/sites-available/<server_name>` and a symlink in `sites-enabled`. The file listens on 80 and on 443. Port 80 includes `/etc/nginx/snippets/nvk-https-redirect.conf`, which redirects to HTTPS. The certificate is the one already in the http context (`conf.d`), or lines certbot adds on that server — the same rule as an app site. `nginx -t` fails until a certificate exists.
+
+A subdirectory writes a snippet under `/etc/nginx/snippets/` and includes it in the existing site’s TLS server. The files stay in `-Root`. The URL is `/<base path>/`.
+
+`-Root` must already exist. This command does not publish files.
 
 ## Update one instance
 
@@ -230,6 +250,7 @@ To delete the instance directory and nginx as well, use `nvk-app-uninstall`.
 /usr/local/sbin/nvk-startup
 /usr/local/sbin/nvk-service
 /usr/local/sbin/nvk-info
+/usr/local/sbin/nvk-nginx
 /usr/local/sbin/nvk-app-install
 /usr/local/sbin/nvk-app-uninstall
 /usr/local/sbin/nvk-app-update

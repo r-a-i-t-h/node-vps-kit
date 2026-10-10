@@ -1,4 +1,4 @@
-# Shared helpers for node-vps-kit. Used by bootstrap.ps1, install.ps1, uninstall.ps1, update.ps1, startup.ps1, service.ps1, info.ps1.
+# Shared helpers for node-vps-kit. Used by bootstrap.ps1, install.ps1, uninstall.ps1, update.ps1, startup.ps1, service.ps1, info.ps1, nginx.ps1.
 
 Set-StrictMode -Version Latest
 
@@ -7,6 +7,7 @@ $script:NvkCacheRoot = '/var/cache/node-vps-kit'
 $script:NvkCacheKeep = 3
 $script:NvkSbinDir = '/usr/local/sbin'
 $script:NvkSnapPwsh = '/snap/bin/pwsh'
+$script:NvkHttpsRedirectSnippet = '/etc/nginx/snippets/nvk-https-redirect.conf'
 $script:NvkUtf8 = [System.Text.UTF8Encoding]::new($false)
 $script:NvkKitRoot = $PSScriptRoot
 $script:NvkCmd = 'nvk'
@@ -429,7 +430,7 @@ function Install-NvkKitAndWrappers {
 
     New-Item -ItemType Directory -Path $lib -Force | Out-Null
     if (-not (Test-NvkIsInstalledKitRoot $Source)) {
-        foreach ($name in @('bootstrap.ps1', 'install.ps1', 'uninstall.ps1', 'update.ps1', 'startup.ps1', 'service.ps1', 'info.ps1', 'Nvk.psm1', 'README.md')) {
+        foreach ($name in @('bootstrap.ps1', 'install.ps1', 'uninstall.ps1', 'update.ps1', 'startup.ps1', 'service.ps1', 'info.ps1', 'nginx.ps1', 'Nvk.psm1', 'README.md')) {
             $src = Join-Path $Source $name
             if (Test-Path -LiteralPath $src) {
                 Copy-Item -LiteralPath $src -Destination (Join-Path $lib $name) -Force
@@ -451,7 +452,7 @@ function Install-NvkKitAndWrappers {
                 Remove-Item -LiteralPath $path -Recurse -Force
             }
         }
-        foreach ($entry in @('bootstrap.ps1', 'install.ps1', 'uninstall.ps1', 'update.ps1', 'startup.ps1', 'service.ps1', 'info.ps1')) {
+        foreach ($entry in @('bootstrap.ps1', 'install.ps1', 'uninstall.ps1', 'update.ps1', 'startup.ps1', 'service.ps1', 'info.ps1', 'nginx.ps1')) {
             $p = Join-Path $lib $entry
             if (Test-Path -LiteralPath $p) {
                 Invoke-NvkNative -Command @('chmod', '755', $p) | Out-Null
@@ -475,6 +476,7 @@ function Install-NvkKitAndWrappers {
     $startupWrap = Join-Path $script:NvkSbinDir 'nvk-startup'
     $serviceWrap = Join-Path $script:NvkSbinDir 'nvk-service'
     $infoWrap = Join-Path $script:NvkSbinDir 'nvk-info'
+    $nginxWrap = Join-Path $script:NvkSbinDir 'nvk-nginx'
     $kitUpdateWrap = Join-Path $script:NvkSbinDir 'nvk-update'
     Write-NvkFile $appInstallWrap (New-NvkWrapperScript -Target "$lib/install.ps1")
     Write-NvkFile $appUninstallWrap (New-NvkWrapperScript -Target "$lib/uninstall.ps1")
@@ -482,8 +484,9 @@ function Install-NvkKitAndWrappers {
     Write-NvkFile $startupWrap (New-NvkWrapperScript -Target "$lib/startup.ps1")
     Write-NvkFile $serviceWrap (New-NvkWrapperScript -Target "$lib/service.ps1")
     Write-NvkFile $infoWrap (New-NvkWrapperScript -Target "$lib/info.ps1")
+    Write-NvkFile $nginxWrap (New-NvkWrapperScript -Target "$lib/nginx.ps1")
     Write-NvkFile $kitUpdateWrap (New-NvkWrapperScript -Target "$lib/bootstrap.ps1")
-    foreach ($wrap in @($appInstallWrap, $appUninstallWrap, $appUpdateWrap, $startupWrap, $serviceWrap, $infoWrap, $kitUpdateWrap)) {
+    foreach ($wrap in @($appInstallWrap, $appUninstallWrap, $appUpdateWrap, $startupWrap, $serviceWrap, $infoWrap, $nginxWrap, $kitUpdateWrap)) {
         Invoke-NvkNative -Command @('chmod', '755', $wrap) | Out-Null
     }
     Save-NvkKitRevision -Lib $lib -Source $Source
@@ -1047,6 +1050,588 @@ function Install-NvkNginxPathMount {
     Write-NvkFile $dest $rendered
     Write-NvkInfo "wrote $dest"
     Add-NvkNginxIncludeLine -Site $NginxSite -IncludeLine "include /etc/nginx/snippets/$($App.AppId)-$Name.conf;"
+}
+
+function ConvertTo-NvkServerName {
+    param([Parameter(Mandatory)][string]$Name)
+    $raw = $Name.Trim().TrimEnd('.').ToLowerInvariant()
+    if (-not $raw) { Write-NvkError '-ServerName is required' }
+    $idn = [System.Globalization.IdnMapping]::new()
+    $labels = @($raw.Split('.'))
+    $ascii = foreach ($label in $labels) {
+        if (-not $label) { Write-NvkError "-ServerName '$Name' is not a hostname" }
+        try {
+            $idn.GetAscii($label)
+        }
+        catch {
+            Write-NvkError "-ServerName '$Name' is not a hostname"
+        }
+    }
+    ($ascii -join '.')
+}
+
+function Test-NvkServerName {
+    param([string]$Name)
+    if ([string]::IsNullOrWhiteSpace($Name)) { return $false }
+    if ($Name.Length -gt 253) { return $false }
+    $Name -match '^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$'
+}
+
+function Assert-NvkServerName {
+    param([Parameter(Mandatory)][string]$Name)
+    if (-not (Test-NvkServerName $Name)) {
+        Write-NvkError "-ServerName '$Name' is not a hostname"
+    }
+}
+
+function Resolve-NvkStaticRoot {
+    param([Parameter(Mandatory)][string]$Root)
+    $text = $Root.Trim()
+    if (-not $text) { Write-NvkError '-Root is required (absolute directory of HTML files)' }
+    if ($text -match '[;\{\}#''"`$\s\\]') {
+        Write-NvkError '-Root must be a plain absolute path (no spaces or nginx punctuation)'
+    }
+    if (-not [System.IO.Path]::IsPathRooted($text)) {
+        Write-NvkError '-Root must be an absolute path'
+    }
+    $full = [System.IO.Path]::GetFullPath($text).TrimEnd('/', '\')
+    if (-not $full -or $full -eq [System.IO.Path]::GetPathRoot($full).TrimEnd('/', '\')) {
+        Write-NvkError '-Root must be a site directory, deeper than the filesystem root'
+    }
+    $blocked = @(
+        '/etc', '/usr', '/bin', '/sbin', '/boot', '/proc', '/sys', '/dev', '/run',
+        '/lib', '/lib64', '/root', '/tmp', '/private', '/System', '/Users',
+        '/Applications', '/Library', '/Volumes'
+    )
+    foreach ($prefix in $blocked) {
+        if ($full -eq $prefix -or $full.StartsWith($prefix + '/', [StringComparison]::Ordinal)) {
+            Write-NvkError "-Root must not be under $prefix"
+        }
+    }
+    $parts = @($full.Split([char[]]@('/', '\'), [StringSplitOptions]::RemoveEmptyEntries))
+    if ($parts.Count -lt 2) {
+        Write-NvkError '-Root must be a site directory, not a top-level folder'
+    }
+    if (-not (Test-Path -LiteralPath $full)) {
+        Write-NvkError "-Root not found: $full"
+    }
+    if (-not (Test-Path -LiteralPath $full -PathType Container)) {
+        Write-NvkError "-Root is not a directory: $full"
+    }
+    $target = $full
+    try {
+        $target = [System.IO.Path]::GetFullPath((Resolve-Path -LiteralPath $full).ProviderPath).TrimEnd('/', '\')
+    }
+    catch {
+        Write-NvkError "-Root not found: $full"
+    }
+    if ($target -and $target -ne $full) {
+        foreach ($prefix in $blocked) {
+            if ($target -eq $prefix -or $target.StartsWith($prefix + '/', [StringComparison]::Ordinal)) {
+                Write-NvkError "-Root must not be under $prefix"
+            }
+        }
+    }
+    $full
+}
+
+function Test-NvkStaticBasePath {
+    param([string]$BasePath)
+    if ([string]::IsNullOrWhiteSpace($BasePath)) { return $false }
+    $BasePath -match '^[A-Za-z0-9][A-Za-z0-9._-]*(\/[A-Za-z0-9][A-Za-z0-9._-]*)*$'
+}
+
+function Assert-NvkStaticBasePath {
+    param([Parameter(Mandatory)][string]$BasePath)
+    if (-not (Test-NvkStaticBasePath $BasePath)) {
+        Write-NvkError '-BasePath must be a URL prefix of letters, digits, dots, hyphens, or slashes (no leading slash)'
+    }
+}
+
+function Assert-NvkNginxSiteFile {
+    param([Parameter(Mandatory)][string]$NginxSite)
+    if (-not [System.IO.Path]::IsPathRooted($NginxSite)) {
+        Write-NvkError '-NginxSite must be an absolute path'
+    }
+    $full = [System.IO.Path]::GetFullPath($NginxSite)
+    $roots = @('/etc/nginx/sites-available', '/etc/nginx/sites-enabled', '/etc/nginx/conf.d')
+    $inside = $false
+    foreach ($root in $roots) {
+        if ($full -eq $root) { continue }
+        if ($full.StartsWith($root + '/', [StringComparison]::Ordinal)) { $inside = $true }
+    }
+    if (-not $inside) {
+        Write-NvkError '-NginxSite must be a file under sites-available, sites-enabled, or conf.d'
+    }
+    if (-not (Test-Path -LiteralPath $full -PathType Leaf)) {
+        Write-NvkError "nginx site file not found: $full"
+    }
+    $full
+}
+
+function Find-NvkServerNameOwner {
+    param([Parameter(Mandatory)][string]$ServerName)
+    $want = $ServerName.ToLowerInvariant()
+    foreach ($file in @(Get-NvkNginxSiteFiles)) {
+        if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { continue }
+        $raw = Get-Content -LiteralPath $file -Raw -ErrorAction SilentlyContinue
+        if (-not $raw) { continue }
+        foreach ($match in [regex]::Matches($raw, '(?m)^\s*server_name\s+([^;#]+);')) {
+            foreach ($token in @($match.Groups[1].Value -split '\s+' | Where-Object { $_ })) {
+                if ($token.ToLowerInvariant() -eq $want) { return $file }
+            }
+        }
+    }
+    $null
+}
+
+function Get-NvkNginxServerSpans {
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Text)
+    $lines = @([regex]::Split($Text, '\r?\n'))
+    $depth = 0
+    $start = -1
+    $spans = [System.Collections.Generic.List[object]]::new()
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        $code = $lines[$i] -replace '#.*$', ''
+        $open = ([regex]::Matches($code, '\{')).Count
+        $close = ([regex]::Matches($code, '\}')).Count
+        if ($depth -eq 0 -and $code -match '(^|\s)server\s*(\{|$)') {
+            $start = $i
+        }
+        $depth += $open - $close
+        if ($depth -lt 0) { $depth = 0 }
+        if ($start -ge 0 -and $depth -eq 0 -and ($open -gt 0 -or $close -gt 0)) {
+            $body = ($lines[$start..$i] -join "`n")
+            $spans.Add([pscustomobject]@{ Start = $start; End = $i; Body = $body })
+            $start = -1
+        }
+    }
+    foreach ($span in $spans) { $span }
+}
+
+function Add-NvkNginxSslIncludeText {
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Text,
+        [Parameter(Mandatory)][string]$IncludeLine
+    )
+    if ($Text.Contains($IncludeLine)) {
+        return [pscustomobject]@{ Changed = $false; Missing = $false; Text = $Text; Servers = 0 }
+    }
+    $spans = @(Get-NvkNginxServerSpans $Text)
+    if ($spans.Count -eq 0) {
+        return [pscustomobject]@{ Changed = $false; Missing = $true; Text = $Text; Servers = 0 }
+    }
+    $targets = @($spans | Where-Object { $_.Body -match '(?m)^\s*listen\s+[^;#]*\b443\b' })
+    if ($targets.Count -eq 0 -and $spans.Count -eq 1) {
+        $targets = @($spans)
+    }
+    if ($targets.Count -eq 0) {
+        return [pscustomobject]@{ Changed = $false; Missing = $true; Text = $Text; Servers = $spans.Count }
+    }
+    $lines = [System.Collections.Generic.List[string]]::new()
+    foreach ($line in @([regex]::Split($Text, '\r?\n'))) { $lines.Add([string]$line) }
+    foreach ($span in @($targets | Sort-Object End -Descending)) {
+        $lines.Insert([int]$span.End, "    $IncludeLine")
+    }
+    [pscustomobject]@{
+        Changed = $true
+        Missing = $false
+        Text    = ($lines -join "`n")
+        Servers = $targets.Count
+    }
+}
+
+function Expand-NvkStaticTemplate {
+    param(
+        [Parameter(Mandatory)][string]$TemplatePath,
+        [Parameter(Mandatory)][hashtable]$Map
+    )
+    if (-not (Test-Path -LiteralPath $TemplatePath)) {
+        Write-NvkError "missing nginx template: $TemplatePath"
+    }
+    $text = Get-Content -LiteralPath $TemplatePath -Raw
+    foreach ($key in @('__SERVER_NAME__', '__BASE_PATH__', '__ROOT__')) {
+        if ($Map.ContainsKey($key)) {
+            $text = $text.Replace($key, [string]$Map[$key])
+        }
+    }
+    if ($text -match '__[A-Z0-9_]+__') {
+        Write-NvkError "nginx template still has a placeholder ($($Matches[0]))"
+    }
+    $text
+}
+
+function New-NvkStaticSiteConfig {
+    param(
+        [Parameter(Mandatory)][string]$ServerName,
+        [Parameter(Mandatory)][string]$Root
+    )
+    Expand-NvkStaticTemplate `
+        -TemplatePath (Join-Path $script:NvkKitRoot 'templates/nginx/static-site.conf') `
+        -Map @{
+            '__SERVER_NAME__' = $ServerName
+            '__ROOT__'        = $Root
+        }
+}
+
+function New-NvkStaticLocationConfig {
+    param(
+        [Parameter(Mandatory)][string]$BasePath,
+        [Parameter(Mandatory)][string]$Root
+    )
+    Expand-NvkStaticTemplate `
+        -TemplatePath (Join-Path $script:NvkKitRoot 'templates/nginx/static-location.conf') `
+        -Map @{
+            '__BASE_PATH__' = $BasePath
+            '__ROOT__'      = $Root
+        }
+}
+
+function Install-NvkHttpsRedirectSnippet {
+    $template = Join-Path $script:NvkKitRoot 'templates/nginx/https-redirect.conf'
+    $rendered = Expand-NvkStaticTemplate -TemplatePath $template -Map @{}
+    $dest = $script:NvkHttpsRedirectSnippet
+    if (Test-Path -LiteralPath $dest) {
+        $current = Get-Content -LiteralPath $dest -Raw
+        if ($current.Trim() -eq $rendered.Trim()) { return }
+    }
+    Write-NvkFile $dest $rendered
+    Write-NvkInfo "wrote $dest"
+}
+
+function Get-NvkStaticSnippetPath {
+    param(
+        [Parameter(Mandatory)][string]$NginxSite,
+        [Parameter(Mandatory)][string]$BasePath
+    )
+    $leaf = [regex]::Replace((Split-Path -Leaf $NginxSite), '[^A-Za-z0-9._-]', '-')
+    $slug = [regex]::Replace($BasePath, '[^A-Za-z0-9._-]', '-')
+    "/etc/nginx/snippets/nvk-static-$leaf-$slug.conf"
+}
+
+function Get-NvkDeclaredServerNames {
+    param([Parameter(Mandatory)][string]$Text)
+    $names = [System.Collections.Generic.List[string]]::new()
+    $seen = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($match in [regex]::Matches($Text, '(?m)^\s*server_name\s+([^;#]+);')) {
+        foreach ($token in @($match.Groups[1].Value -split '\s+' | Where-Object { $_ })) {
+            if ($token -eq '_' -or $token.StartsWith('~')) { continue }
+            if ($seen.Add($token)) { $names.Add($token) }
+        }
+    }
+    @($names)
+}
+
+function Write-NvkStaticRootNote {
+    param([Parameter(Mandatory)][string]$Root)
+    if (-not (Test-Path -LiteralPath (Join-Path $Root 'index.html'))) {
+        Write-Host "nginx: $Root has no index.html" -ForegroundColor Yellow
+    }
+    try {
+        $cursor = [System.IO.Path]::GetFullPath($Root)
+        while ($cursor) {
+            $item = Get-Item -LiteralPath $cursor -ErrorAction Stop
+            $mode = [int]$item.UnixFileMode
+            $blocked = (($mode -band 1) -eq 0) -or (($cursor -eq [System.IO.Path]::GetFullPath($Root)) -and (($mode -band 4) -eq 0))
+            if ($blocked) {
+                Write-Host "nginx: www-data may not be able to read $Root (a directory on the way is not world-accessible). The site will 403 until it is." -ForegroundColor Yellow
+                break
+            }
+            $parent = [System.IO.Path]::GetDirectoryName($cursor)
+            if (-not $parent -or $parent -eq $cursor) { break }
+            $cursor = $parent
+        }
+    }
+    catch {
+        return
+    }
+}
+
+function Read-NvkStaticRootParam {
+    param([string]$Root)
+    if (-not [string]::IsNullOrWhiteSpace($Root)) {
+        return (Resolve-NvkStaticRoot $Root)
+    }
+    $choices = @()
+    if (Test-Path -LiteralPath '/var/www' -PathType Container) {
+        $choices = @(
+            Get-ChildItem -LiteralPath '/var/www' -Directory -ErrorAction SilentlyContinue |
+                Sort-Object Name |
+                Select-Object -First 20 |
+                ForEach-Object { New-NvkChoice -Label $_.FullName -Value $_.FullName }
+        )
+    }
+    while ($true) {
+        $picked = [string](Read-NvkChoice `
+                -Message '-Root is required. Select a directory to serve, or type an absolute path.' `
+                -Choices $choices `
+                -AllowCustom `
+                -MissingError '-Root is required (absolute directory of HTML files)')
+        try {
+            return (Resolve-NvkStaticRoot $picked)
+        }
+        catch {
+            $message = $_.Exception.Message
+            if (-not (Test-NvkInteractive) -or $message -notlike "$($script:NvkCmd):*") { throw }
+            Write-Host $message -ForegroundColor Yellow
+        }
+    }
+}
+
+function Assert-NvkStaticHostnameFree {
+    param([Parameter(Mandatory)][string]$ServerName)
+    $owner = Find-NvkServerNameOwner $ServerName
+    if ($owner) {
+        Write-NvkError "server_name $ServerName is already served by $owner"
+    }
+    $dest = "/etc/nginx/sites-available/$ServerName"
+    $link = "/etc/nginx/sites-enabled/$ServerName"
+    if ((Test-Path -LiteralPath $dest) -or (Test-Path -LiteralPath $link)) {
+        Write-NvkError "site already exists: $dest"
+    }
+}
+
+function Resolve-NvkStaticSiteParams {
+    param(
+        [string]$ServerName,
+        [string]$Root,
+        [string]$NginxSite,
+        [string]$BasePath
+    )
+    $server = if ($ServerName) { $ServerName.Trim() } else { '' }
+    $site = if ($NginxSite) { $NginxSite.Trim() } else { '' }
+    $path = if ($BasePath) { $BasePath.Trim().Trim('/') } else { '' }
+    $directory = if ($Root) { $Root.Trim() } else { '' }
+
+    if ($server -and ($site -or $path)) {
+        Write-NvkError 'use either -ServerName (new site) or -NginxSite (subdirectory), not both'
+    }
+
+    $mode = ''
+    if ($server) { $mode = 'hostname' }
+    elseif ($site -or $path) { $mode = 'path' }
+    else {
+        $mode = [string](Read-NvkChoice `
+                -Message 'How should nginx serve this site?' `
+                -Choices @(
+                    (New-NvkChoice -Label 'new hostname (subdomain)' -Value 'hostname')
+                    (New-NvkChoice -Label 'subdirectory on an existing site' -Value 'path')
+                ) `
+                -MissingError 'provide -ServerName HOST and -Root DIR, or -NginxSite FILE -BasePath PATH -Root DIR')
+    }
+
+    if ($mode -eq 'hostname') {
+        if (-not $server) {
+            $hostChoices = [System.Collections.Generic.List[object]]::new()
+            $fqdn = Get-NvkFqdn
+            if ($fqdn) {
+                $hostChoices.Add((New-NvkChoice -Label $fqdn -Value $fqdn))
+                if ($fqdn -notlike 'www.*') {
+                    $hostChoices.Add((New-NvkChoice -Label "www.$fqdn" -Value "www.$fqdn"))
+                }
+            }
+            while ($true) {
+                $server = [string](Read-NvkChoice `
+                        -Message '-ServerName is required. Select a hostname, or type one.' `
+                        -Choices @($hostChoices) `
+                        -AllowCustom `
+                        -MissingError '-ServerName is required')
+                try {
+                    $server = ConvertTo-NvkServerName $server
+                    Assert-NvkServerName $server
+                    Assert-NvkStaticHostnameFree $server
+                    break
+                }
+                catch {
+                    $message = $_.Exception.Message
+                    if (-not (Test-NvkInteractive) -or $message -notlike "$($script:NvkCmd):*") { throw }
+                    Write-Host $message -ForegroundColor Yellow
+                }
+            }
+        }
+        else {
+            $server = ConvertTo-NvkServerName $server
+            Assert-NvkServerName $server
+            Assert-NvkStaticHostnameFree $server
+        }
+        $directory = Read-NvkStaticRootParam -Root $directory
+        return [pscustomobject]@{
+            Mode       = 'hostname'
+            ServerName = $server
+            Root       = $directory
+            NginxSite  = ''
+            BasePath   = ''
+        }
+    }
+
+    if (-not $site) {
+        $sites = @(Get-NvkNginxSiteFiles)
+        $siteChoices = @($sites | ForEach-Object { New-NvkChoice -Label $_ -Value $_ })
+        $site = [string](Read-NvkChoice `
+                -Message '-NginxSite is required. Select a site file, or type a path.' `
+                -Choices $siteChoices `
+                -AllowCustom `
+                -MissingError '-NginxSite requires a site file path')
+    }
+    $site = Assert-NvkNginxSiteFile $site
+
+    if (-not $path) {
+        while ($true) {
+            $path = [string](Read-NvkChoice `
+                    -Message '-BasePath is required. Type a URL prefix (no leading slash).' `
+                    -AllowCustom `
+                    -MissingError '-NginxSite requires -BasePath (a URL prefix such as books)')
+            $path = $path.Trim().Trim('/')
+            if (Test-NvkStaticBasePath $path) { break }
+            if (-not (Test-NvkInteractive)) {
+                Write-NvkError '-BasePath must be a URL prefix of letters, digits, dots, hyphens, or slashes (no leading slash)'
+            }
+            Write-Host "$($script:NvkCmd): -BasePath must be a URL prefix of letters, digits, dots, hyphens, or slashes" -ForegroundColor Yellow
+        }
+    }
+    else {
+        Assert-NvkStaticBasePath $path
+    }
+
+    $directory = Read-NvkStaticRootParam -Root $directory
+    [pscustomobject]@{
+        Mode       = 'path'
+        ServerName = ''
+        Root       = $directory
+        NginxSite  = $site
+        BasePath   = $path
+    }
+}
+
+function Install-NvkStaticHostname {
+    param(
+        [Parameter(Mandatory)][string]$ServerName,
+        [Parameter(Mandatory)][string]$Root
+    )
+    Assert-NvkRoot
+    Assert-NvkCommand nginx
+    Assert-NvkCommand systemctl
+    Assert-NvkServerName $ServerName
+    $Root = Resolve-NvkStaticRoot $Root
+    if (-not (Test-Path -LiteralPath '/etc/nginx/sites-available')) {
+        Write-NvkError '/etc/nginx/sites-available not found (this command expects Ubuntu nginx)'
+    }
+    Assert-NvkStaticHostnameFree $ServerName
+    $dest = "/etc/nginx/sites-available/$ServerName"
+    $link = "/etc/nginx/sites-enabled/$ServerName"
+
+    Initialize-NvkHttpIncludes
+    Install-NvkHttpsRedirectSnippet
+    Write-NvkFile $dest (New-NvkStaticSiteConfig -ServerName $ServerName -Root $Root)
+    New-Item -ItemType Directory -Path '/etc/nginx/sites-enabled' -Force | Out-Null
+    try {
+        Invoke-NvkNative -Command @('ln', '-sfn', $dest, $link) | Out-Null
+        Test-NvkNginxConfig
+    }
+    catch {
+        if (Test-Path -LiteralPath $link) { Remove-Item -LiteralPath $link -Force -ErrorAction SilentlyContinue }
+        if (Test-Path -LiteralPath $dest) { Remove-Item -LiteralPath $dest -Force -ErrorAction SilentlyContinue }
+        Write-NvkInfo 'removed the new site because nginx -t failed'
+        throw
+    }
+    Update-NvkNginxService
+    Write-NvkInfo "wrote $dest and enabled it"
+    Write-NvkStaticRootNote $Root
+    Write-Host @"
+
+Static site is served.
+
+  URL:    https://$ServerName/
+  Files:  $Root
+  Site:   $dest
+
+Port 80 includes $($script:NvkHttpsRedirectSnippet) and redirects to HTTPS.
+TLS uses the certificate in the http context (conf.d), or lines certbot adds on this server.
+
+Next:
+  - Point DNS for $ServerName at this VPS.
+  - After DNS works: sudo certbot --nginx -d $ServerName
+
+"@
+}
+
+function Install-NvkStaticPath {
+    param(
+        [Parameter(Mandatory)][string]$NginxSite,
+        [Parameter(Mandatory)][string]$BasePath,
+        [Parameter(Mandatory)][string]$Root
+    )
+    Assert-NvkRoot
+    Assert-NvkCommand nginx
+    Assert-NvkCommand systemctl
+    $NginxSite = Assert-NvkNginxSiteFile $NginxSite
+    Assert-NvkStaticBasePath $BasePath
+    $Root = Resolve-NvkStaticRoot $Root
+    $snippet = Get-NvkStaticSnippetPath -NginxSite $NginxSite -BasePath $BasePath
+    $include = "include $snippet;"
+    $rendered = New-NvkStaticLocationConfig -BasePath $BasePath -Root $Root
+    $siteText = Get-Content -LiteralPath $NginxSite -Raw
+    if ($siteText.Contains($include)) {
+        if (-not (Test-Path -LiteralPath $snippet)) {
+            Write-NvkFile $snippet $rendered
+            Write-NvkInfo "wrote $snippet"
+            Test-NvkNginxConfig
+            Update-NvkNginxService
+        }
+        else {
+            Write-NvkInfo "nginx already includes $include"
+        }
+        return
+    }
+    if (Test-Path -LiteralPath $snippet) {
+        Write-NvkError "snippet already exists: $snippet"
+    }
+
+    $edited = Add-NvkNginxSslIncludeText -Text $siteText -IncludeLine $include
+    if ($edited.Missing) {
+        Write-NvkFile $snippet $rendered
+        Write-NvkInfo "wrote $snippet"
+        Write-Host "nginx: could not find a TLS server in $NginxSite. Add this line inside the server { } that should serve the path, then reload nginx:" -ForegroundColor Yellow
+        Write-Host "    $include" -ForegroundColor Yellow
+        return
+    }
+
+    $snippetExisted = Test-Path -LiteralPath $snippet
+    $backup = "$NginxSite.node-vps-kit.bak"
+    Copy-Item -LiteralPath $NginxSite -Destination $backup -Force
+    Write-NvkFile $snippet $rendered
+    Write-NvkFile $NginxSite $edited.Text
+    try {
+        Test-NvkNginxConfig
+    }
+    catch {
+        Copy-Item -LiteralPath $backup -Destination $NginxSite -Force
+        if (-not $snippetExisted -and (Test-Path -LiteralPath $snippet)) {
+            Remove-Item -LiteralPath $snippet -Force -ErrorAction SilentlyContinue
+        }
+        Write-NvkInfo 'restored the site because nginx -t failed'
+        throw
+    }
+    Update-NvkNginxService
+    $where = if ($edited.Servers -eq 1) { '1 TLS server' } else { "$($edited.Servers) TLS servers" }
+    Write-NvkInfo "wrote $snippet and included it in $where"
+    Write-NvkStaticRootNote $Root
+    $names = @(Get-NvkDeclaredServerNames $siteText)
+    $urlLines = if ($names.Count -gt 0) {
+        ($names | ForEach-Object { "  URL:     https://$_/$BasePath/" }) -join "`n"
+    }
+    else {
+        "  URL:     /$BasePath/ on $NginxSite"
+    }
+    Write-Host @"
+
+Static path is served.
+
+$urlLines
+  Files:   $Root
+  Snippet: $snippet
+
+"@
 }
 
 function Write-NvkEnvFile {

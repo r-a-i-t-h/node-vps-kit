@@ -118,6 +118,8 @@ A new hostname writes `/etc/nginx/sites-available/<server_name>` and a symlink i
 
 A subdirectory writes a snippet under `/etc/nginx/snippets/` and includes it in the existing site’s TLS server. The files stay in `-Root`. The URL is `/<base path>/`.
 
+Both send `Cache-Control: no-cache`. A browser may store a file, and it checks with nginx before using that copy, so a changed file is served on the next visit. An unchanged file is answered with 304.
+
 `-Root` must already exist. This command does not publish files.
 
 ## Update one instance
